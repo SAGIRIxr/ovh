@@ -157,7 +157,7 @@ export const commonLayerZh = {
       "tor": "多伦多",
       "mum": "孟买",
       "waw": "华沙",
-      "fra": "法兰克福",
+      "fra": "林堡",
       "lon": "伦敦",
       "hil": "俄勒冈",
       "vin": "弗吉尼亚",
@@ -395,7 +395,6 @@ export const commonLayerZh = {
     openMenu: "打开菜单",
     expandRail: "展开导航",
     collapseRail: "收起导航",
-    cola: "可乐",
     account: {
       loadFailed: "账户列表读取失败",
       add: "添加 OVH 账户",

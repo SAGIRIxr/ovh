@@ -41,7 +41,7 @@ var dcDisplayMapCN = map[string]string{
 	"mil":    "🇮🇹 意大利·米兰",
 	"lim":    "🇩🇪 德国·林堡",
 	"waw":    "🇵🇱 波兰·华沙",
-	"fra":    "🇩🇪 德国·法兰克福",
+	"fra":    "🇩🇪 德国·林堡(FRA)",
 	"lon":    "🇬🇧 英国·伦敦",
 	"bhs":    "🇨🇦 加拿大·博阿尔诺",
 	"tor":    "🇨🇦 加拿大·多伦多",

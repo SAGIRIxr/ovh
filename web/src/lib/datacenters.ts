@@ -27,7 +27,8 @@ export const OVH_DATACENTERS: DataCenter[] = [
   { code: "tor", apiCode: "ca-east-tor-a", name: "多伦多", region: "加拿大" },
   { code: "mum", apiCode: "ynm", name: "孟买", region: "印度" },
   { code: "waw", name: "华沙", region: "波兰" },
-  { code: "fra", name: "法兰克福", region: "德国" },
+  // OVH 对外叫 Frankfurt,机房实际在林堡(Limburg an der Lahn,法兰克福西北约 60 公里)
+  { code: "fra", name: "林堡", region: "德国" },
   { code: "lon", name: "伦敦", region: "英国" },
   { code: "hil", name: "俄勒冈", region: "美国西部" },
   { code: "vin", name: "弗吉尼亚", region: "美国东部" },

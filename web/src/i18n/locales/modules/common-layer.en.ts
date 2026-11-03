@@ -163,7 +163,7 @@ const pack: CommonLayerPack = {
       "tor": "Toronto",
       "mum": "Mumbai",
       "waw": "Warsaw",
-      "fra": "Frankfurt",
+      "fra": "Limburg",
       "lon": "London",
       "hil": "Hillsboro (OR)",
       "vin": "Virginia",
@@ -412,7 +412,6 @@ const pack: CommonLayerPack = {
     openMenu: "Open menu",
     expandRail: "Expand navigation",
     collapseRail: "Collapse navigation",
-    cola: "cola",
     account: {
       loadFailed: "Failed to load the account list",
       add: "Add an OVH account",

@@ -576,3 +576,7 @@ Go 收到 SIGTERM 默认当场终止,内存里还没落盘的日志会**整段�
 
 **两个必须一起备份**。只备份 `sniper.db` 而丢了 `OVH_DB_KEY`,已存的 OVH 凭据和 Telegram token
 就再也解不开了,只能去 OVH 控制台吊销后重新录入。
+
+## 鸣谢
+
+本项目 fork 自 [gokele/ovh](https://github.com/gokele/ovh)，感谢原作者可乐（cola）的工作。

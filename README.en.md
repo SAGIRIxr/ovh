@@ -533,3 +533,7 @@ v0.1.31 and earlier: the program didn't handle SIGTERM, which is exactly what `d
 - Encryption key: `OVH_DB_KEY` in `.env`
 
 **Back up both together**. Only backing up `sniper.db` and losing `OVH_DB_KEY` means stored OVH credentials and Telegram tokens are undecryptable forever — you'd have to revoke and re-enter them from the OVH console.
+
+## Acknowledgements
+
+This project is a fork of [gokele/ovh](https://github.com/gokele/ovh). Thanks to the original author, cola (可乐).
