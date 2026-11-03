@@ -54,18 +54,29 @@ func runQueueAttempt(ctx context.Context, state *app.State, it types.QueueItem, 
 
 	outcome = purchase(ctx, state, &snapshot)
 	if outcome.PauseTask {
-		// 结账不确定:暂停而不是重试(重试可能买两台)。不计失败次数
+		// 结账不确定 / 优惠码被拒:暂停而不是重试(重试可能买两台或按原价扣款)。不计失败次数
 		state.QueueMu.Lock()
 		for i := range state.Queue {
 			if state.Queue[i].ID == it.ID {
 				state.Queue[i].Status = "paused"
 				state.Queue[i].UpdatedAt = types.NowISO()
+				if outcome.UncertainCheckout {
+					// 落库:用户隔天才点恢复、中间还重启过,也得先对账
+					state.Queue[i].UncertainCheckout = true
+					if state.Queue[i].UncertainTime == "" {
+						state.Queue[i].UncertainTime = types.NowISO()
+					}
+				}
 				break
 			}
 		}
 		state.QueueMu.Unlock()
 		_ = state.SaveQueue()
-		state.Logger.Info("任务已暂停(结账结果不确定,等人工确认): "+it.PlanCode, "queue")
+		reason := outcome.PauseReason
+		if reason == "" {
+			reason = "结账结果不确定,等人工确认"
+		}
+		state.Logger.Info("任务已暂停("+reason+"): "+it.PlanCode, "queue")
 		return outcome
 	}
 	if outcome.Cancelled {

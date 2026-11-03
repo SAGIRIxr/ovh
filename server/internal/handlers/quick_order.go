@@ -34,6 +34,7 @@ func QuickOrder(state *app.State) gin.HandlerFunc {
 			SkipDuplicateCheck bool     `json:"skipDuplicateCheck"`
 			AutoPay            bool     `json:"autoPay"`
 			Coupon             string   `json:"coupon"`
+			CouponFallback     bool     `json:"couponFallback"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "任务参数格式不正确"})
@@ -236,6 +237,8 @@ func QuickOrder(state *app.State) gin.HandlerFunc {
 			RetryCount: 0,
 			AutoPay:    body.AutoPay,
 			Coupon:     strings.TrimSpace(body.Coupon),
+			// 优惠码被拒时仍按原价自动付款;不开自动付款就无所谓
+			CouponFallback: body.CouponFallback && body.AutoPay,
 			// MaxRetries 封顶的是**真正提交并失败的次数**(FailureCount),无货轮次不计。
 			// 早先按"检查轮次"封顶是错的:监控只在 无货→有货 的跳变上重新触发 quick-order,
 			// 一旦库存持续可见而下单侧连续吃 429/5xx,任务用尽轮次置 failed 后

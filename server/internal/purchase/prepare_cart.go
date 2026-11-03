@@ -10,6 +10,7 @@ import (
 
 	"github.com/ovh-buy/server/internal/app"
 	"github.com/ovh-buy/server/internal/catalog"
+	"github.com/ovh-buy/server/internal/notify"
 	"github.com/ovh-buy/server/internal/numconv"
 	"github.com/ovh-buy/server/internal/ovh"
 	"github.com/ovh-buy/server/internal/types"
@@ -294,8 +295,8 @@ func prepareCart(ctx context.Context, state *app.State, item *types.QueueItem, c
 				})
 			}
 			if len(missing) > 0 {
-				if item.Preorder {
-					state.Logger.Info(fmt.Sprintf("预订任务 %s 等待所选硬件配置开放: %v", item.ID, missing), "purchase")
+				if item.Preorder || item.Force {
+					state.Logger.Info(fmt.Sprintf("%s %s 等待所选硬件配置开放: %v", waitingKind(item), item.ID, missing), "purchase")
 					return nil, Outcome{WaitingForCatalog: true}
 				}
 				errMsg := fmt.Sprintf("用户请求的硬件选项 %v 未在 OVH 可用 Eco 选项中找到（已取消下单避免下到错误配置）", missing)
@@ -351,6 +352,16 @@ func prepareCart(ctx context.Context, state *app.State, item *types.QueueItem, c
 				return nil, Outcome{}
 			}
 			// 明确被拒绝才回退;网络故障不能当作优惠码无效。
+			// 开了自动付款却没勾「优惠码无效仍付款」:不能悄悄按原价扣钱,暂停任务等用户决定。
+			if item.AutoPay && !item.CouponFallback {
+				msg := fmt.Sprintf("优惠码 %s 被 OVH 拒绝，任务已暂停，没有按原价付款。原因: %s", coupon, ovh.Explain(err))
+				state.Logger.Warn(msg, "purchase")
+				recordTiming(timingKey, tl, "failed")
+				fail(msg)
+				notify.Broadcast(state, fmt.Sprintf("⚠️ 抢购 %s@%s: %s\n\n换个优惠码,或在任务里勾选「优惠码无效时仍按原价付款」后恢复。",
+					item.PlanCode, item.Datacenter, msg), nil)
+				return nil, Outcome{PauseTask: true, PauseReason: "优惠码被拒且不允许原价付款"}
+			}
 			couponWarning = "优惠码被 OVH 拒绝，本次未使用优惠码，价格不包含该码优惠。原因: " + ovh.Explain(err)
 			state.Logger.Warn(couponWarning, "purchase")
 		} else {

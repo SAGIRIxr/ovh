@@ -539,7 +539,7 @@ var ErrQueueNotFound = errors.New("任务不存在")
 var ErrQueueNotEditable = errors.New("请先暂停任务再修改；已完成的任务不能修改")
 
 // UpdateQueueItem 仅编辑暂停/失败任务,落库成功后才发布新配置。
-func (s *State) UpdateQueueItem(id, datacenter string, options []string, retryInterval int, autoPay bool, coupon string) error {
+func (s *State) UpdateQueueItem(id, datacenter string, options []string, retryInterval int, autoPay bool, coupon string, couponFallback bool) error {
 	if err := s.SaveBlocked("queue"); err != nil {
 		return err
 	}
@@ -560,6 +560,7 @@ func (s *State) UpdateQueueItem(id, datacenter string, options []string, retryIn
 		next[i].RetryInterval = retryInterval
 		next[i].AutoPay = autoPay
 		next[i].Coupon = coupon
+		next[i].CouponFallback = couponFallback && autoPay
 		next[i].Status = "paused"
 		next[i].FailureCount = 0
 		next[i].LastCheckTime = 0
@@ -571,6 +572,27 @@ func (s *State) UpdateQueueItem(id, datacenter string, options []string, retryIn
 		return nil
 	}
 	return ErrQueueNotFound
+}
+
+// ClearUncertainCheckout 恢复后对账确认上一单没建成,去掉未决标记并落库。
+// 落库失败只记日志:标记残留的代价只是下次再对账一次。
+func (s *State) ClearUncertainCheckout(id string) {
+	s.QueueMu.Lock()
+	changed := false
+	for i := range s.Queue {
+		if s.Queue[i].ID == id && s.Queue[i].UncertainCheckout {
+			s.Queue[i].UncertainCheckout = false
+			s.Queue[i].UncertainTime = ""
+			changed = true
+			break
+		}
+	}
+	s.QueueMu.Unlock()
+	if changed {
+		if err := s.SaveQueue(); err != nil {
+			s.Logger.Warn("清除结账未决标记后保存队列失败: "+err.Error(), "queue")
+		}
+	}
 }
 
 // MarkTaskDeleted 标记删除并中断本轮下单,所有删除入口统一调用。

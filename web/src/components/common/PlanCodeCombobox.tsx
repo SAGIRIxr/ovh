@@ -1,7 +1,7 @@
 import { useState, useMemo } from "react";
 import { Command } from "cmdk";
 import { useTranslation } from "react-i18next";
-import { Check, ChevronsUpDown, Search, X } from "lucide-react";
+import { Check, ChevronsUpDown, Plus, Search, X } from "lucide-react";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -12,6 +12,7 @@ import type { ServerPlan } from "@/hooks/use-servers";
  *  - 弹层里有搜索框 + 过滤列表,每行 planCode + 名称 + CPU 简介
  *  - 键盘导航(↑↓ + Enter),Esc 关
  *  - 包含库存接口发现的预上架型号,标记后由队列创建预订任务
+ *  - 搜索词不是已知 planCode 时,列表末尾多一项「使用自定义型号」,选中即把搜索词当 planCode
  */
 export function PlanCodeCombobox({
   value,
@@ -45,6 +46,12 @@ export function PlanCodeCombobox({
       return hay.includes(q);
     });
   }, [servers, query]);
+
+  // 目录里没有的型号(小道消息 / 还没上架)直接把输入当 planCode 用,排在匹配项之后:
+  // 有匹配时回车仍选第一条匹配项;一条都没有时它是唯一项,回车即选中
+  const customCode = query.trim();
+  const showCustom =
+    customCode.length > 0 && !servers.some((s) => s.planCode.toLowerCase() === customCode.toLowerCase());
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -154,6 +161,32 @@ export function PlanCodeCombobox({
                 </Command.Item>
               );
             })}
+            {showCustom && (
+              <Command.Item
+                key="__custom__"
+                value={`__custom__:${customCode}`}
+                onSelect={() => {
+                  onChange(customCode);
+                  setOpen(false);
+                  setQuery("");
+                }}
+                className={cn(
+                  "flex items-center gap-2 rounded-md px-2 py-1.5 text-sm cursor-pointer",
+                  "aria-selected:bg-muted aria-selected:text-foreground"
+                )}
+              >
+                <Plus className="w-3.5 h-3.5 shrink-0 text-warning" />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-baseline gap-2">
+                    <span className="text-[12px] text-muted-foreground shrink-0">{t("commons.planCode.useCustom")}</span>
+                    <code className="font-mono font-semibold text-[13px] truncate">{customCode}</code>
+                  </div>
+                  <div className="text-[11px] text-muted-foreground truncate mt-0.5">
+                    {t("commons.planCode.useCustomHint")}
+                  </div>
+                </div>
+              </Command.Item>
+            )}
           </Command.List>
         </Command>
       </PopoverContent>

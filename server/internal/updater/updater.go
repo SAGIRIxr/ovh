@@ -37,8 +37,8 @@ import (
 )
 
 const (
-	// Repo 上游仓库,与 handlers 里的检查逻辑保持一致
-	Repo = "gokele/ovh"
+	// Repo 发版仓库(本 fork),与 handlers 里的检查逻辑保持一致
+	Repo = "SAGIRIxr/ovh"
 	// UserAgent GitHub API 要求带 UA
 	UserAgent = "OVH-Console-Updater"
 	// ChecksumAsset 校验和文件名(build.sh 发版时生成并上传)

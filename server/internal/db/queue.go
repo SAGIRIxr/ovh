@@ -29,6 +29,10 @@ type queueRow struct {
 	AutoPay            int     `db:"auto_pay"`
 	Preorder           int     `db:"preorder"`
 	Coupon             string  `db:"coupon"`
+	ForceOrder         int     `db:"force_order"`
+	CouponFallback     int     `db:"coupon_fallback"`
+	UncertainCheckout  int     `db:"uncertain_checkout"`
+	UncertainTime      string  `db:"uncertain_time"`
 }
 
 func rowToQueueItem(r queueRow) types.QueueItem {
@@ -60,6 +64,10 @@ func rowToQueueItem(r queueRow) types.QueueItem {
 		AutoPay:            r.AutoPay == 1,
 		Preorder:           r.Preorder == 1,
 		Coupon:             r.Coupon,
+		Force:              r.ForceOrder == 1,
+		CouponFallback:     r.CouponFallback == 1,
+		UncertainCheckout:  r.UncertainCheckout == 1,
+		UncertainTime:      r.UncertainTime,
 	}
 }
 
@@ -98,6 +106,10 @@ func queueItemToRow(q types.QueueItem) (queueRow, error) {
 		AutoPay:            bi(q.AutoPay),
 		Preorder:           bi(q.Preorder),
 		Coupon:             q.Coupon,
+		ForceOrder:         bi(q.Force),
+		CouponFallback:     bi(q.CouponFallback),
+		UncertainCheckout:  bi(q.UncertainCheckout),
+		UncertainTime:      q.UncertainTime,
 	}, nil
 }
 
@@ -134,11 +146,13 @@ func (db *DB) ReplaceQueue(items []types.QueueItem) error {
 			INSERT INTO queue
 			(id, account_id, plan_code, datacenter, options, status, created_at, updated_at,
 			 retry_interval, retry_count, failure_count, max_retries, last_check_time,
-			 quick_order, priority, from_telegram, config_sniper_task_id, auto_pay, preorder, coupon)
+			 quick_order, priority, from_telegram, config_sniper_task_id, auto_pay, preorder, coupon,
+			 force_order, coupon_fallback, uncertain_checkout, uncertain_time)
 			VALUES
 			(:id, :account_id, :plan_code, :datacenter, :options, :status, :created_at, :updated_at,
 			 :retry_interval, :retry_count, :failure_count, :max_retries, :last_check_time,
-			 :quick_order, :priority, :from_telegram, :config_sniper_task_id, :auto_pay, :preorder, :coupon)
+			 :quick_order, :priority, :from_telegram, :config_sniper_task_id, :auto_pay, :preorder, :coupon,
+			 :force_order, :coupon_fallback, :uncertain_checkout, :uncertain_time)
 		`, r)
 		if err != nil {
 			return fmt.Errorf("insert queue %s: %w", q.ID, err)

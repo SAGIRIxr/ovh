@@ -81,6 +81,17 @@ func (db *DB) migrate() error {
 	if err := db.addColumnIfMissing("queue", "coupon", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
+	// 强制入队 / 优惠码被拒仍付款 / 结账未决标记。ListQueue 是 SELECT * 严格映射,列和字段必须同时上线
+	for _, col := range [][2]string{
+		{"force_order", "INTEGER NOT NULL DEFAULT 0"},
+		{"coupon_fallback", "INTEGER NOT NULL DEFAULT 0"},
+		{"uncertain_checkout", "INTEGER NOT NULL DEFAULT 0"},
+		{"uncertain_time", "TEXT NOT NULL DEFAULT ''"},
+	} {
+		if err := db.addColumnIfMissing("queue", col[0], col[1]); err != nil {
+			return err
+		}
+	}
 	if err := db.addColumnIfMissing("history", "coupon_warning", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}

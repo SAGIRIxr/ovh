@@ -166,9 +166,19 @@ type QueueItem struct {
 	// (checkout 的 autoPayWithPreferredPaymentMethod,schema 描述:
 	// "order will be automatically paid with preferred payment method")。
 	// 默认 false:自动扣钱必须是用户显式打开的开关,不能是隐含行为。
-	AutoPay            bool   `json:"autoPay,omitempty"`
-	Coupon             string `json:"coupon,omitempty"`
-	Preorder           bool   `json:"preorder,omitempty"` // 本地预订:等账户销售目录上架后再尝试下单
+	AutoPay  bool   `json:"autoPay,omitempty"`
+	Coupon   string `json:"coupon,omitempty"`
+	Preorder bool   `json:"preorder,omitempty"` // 本地预订:等账户销售目录上架后再尝试下单
+	// Force 强制入队:型号在三个大区都查不到记录(还没上架的新品)也照样挂着刷,
+	// 库存出来但还没进销售目录 / 所填配置还没开放时继续等,不判死。
+	Force bool `json:"force,omitempty"`
+	// CouponFallback 优惠码被 OVH 拒绝时仍按原价下单并自动付款。
+	// 只在 AutoPay 开着时有意义;默认 false = 暂停任务,不悄悄按原价扣钱。
+	CouponFallback bool `json:"couponFallback,omitempty"`
+	// UncertainCheckout 上一次结账超时且对账没查清,任务因此被暂停。
+	// 恢复后第一轮先去 OVH 对账,确认没建单才重新下单。UncertainTime 是那次结账的时间。
+	UncertainCheckout  bool   `json:"uncertainCheckout,omitempty"`
+	UncertainTime      string `json:"uncertainTime,omitempty"`
 	ConfigSniperTaskID string `json:"configSniperTaskId,omitempty"`
 }
 

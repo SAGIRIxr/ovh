@@ -179,11 +179,11 @@ export function AppShell() {
             </button>
             {/* 冠名:GitHub 仓库 + 作者(可乐/cola)。收起态 GitHub 图标仍在,title 提示仓库地址 */}
             <a
-              href="https://github.com/gokele/ovh"
+              href="https://github.com/SAGIRIxr/ovh"
               target="_blank"
               rel="noreferrer"
               className="nav-item"
-              title="github.com/gokele/ovh"
+              title="github.com/SAGIRIxr/ovh"
             >
               <Github className="nav-ico" size={16} strokeWidth={1.9} />
               <span className="nav-label">{t("shell.cola")}</span>

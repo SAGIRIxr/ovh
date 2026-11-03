@@ -526,6 +526,9 @@ function CreateQueueDialog({
   // 上一版只加了卡片那边,这边漏了
   const [autoPay, setAutoPay] = useState(false);
   const [coupon, setCoupon] = useState("");
+  const [couponFallback, setCouponFallback] = useState(false);
+  // 后端说「哪里都查不到这个型号」时的提示,带一个强制入队按钮
+  const [forceHint, setForceHint] = useState("");
   // 用户选的 addon,按组索引。每次切 planCode 自动清空(让用户重新选)。
   const [picked, setPicked] = useState<Partial<Record<OptionGroupKey, string>>>({});
   // 手填的额外 addon planCode(catalog 里没分组覆盖到的、或用户想加的特殊 addon)
@@ -542,6 +545,7 @@ function CreateQueueDialog({
         touchedRef.current = true;
         setAutoPay(!!editing.autoPay);
         setCoupon(editing.coupon || "");
+        setCouponFallback(!!editing.couponFallback);
       }
     }
   }, [initialPlanCode, open, editing]);
@@ -636,6 +640,8 @@ function CreateQueueDialog({
     setQuantity("1");
     setAutoPay(false);
     setCoupon("");
+    setCouponFallback(false);
+    setForceHint("");
     touchedRef.current = false;
     setRetryInterval(String(cfgDefault));
     setPicked({});
@@ -658,7 +664,7 @@ function CreateQueueDialog({
   const selectAllDC = () => setDatacenters(OVH_DATACENTERS.map((d) => d.code));
   const clearAllDC = () => setDatacenters([]);
 
-  const handleSubmit = async () => {
+  const handleSubmit = async (force = false) => {
     if (!canSubmit) {
       toast.error(t("queue.toast.fillForm"));
       return;
@@ -666,7 +672,7 @@ function CreateQueueDialog({
     if (editing) {
       try {
         await update.mutateAsync({ id: editing.id, datacenter: datacenters[0], options: parsedOptions,
-          retryInterval: Number(retryInterval) || cfgDefault, autoPay, coupon: coupon.trim() });
+          retryInterval: Number(retryInterval) || cfgDefault, autoPay, coupon: coupon.trim(), couponFallback: autoPay && couponFallback });
         reset(); onOpenChange(false);
       } catch { /* Error is shown by the mutation hook; keep the form open. */ }
       return;
@@ -680,10 +686,16 @@ function CreateQueueDialog({
       options: parsedOptions,
       autoPay,
       coupon,
+      couponFallback: autoPay && couponFallback,
       preorder: !!matchedServer?.prerelease,
+      force,
     });
     if (result.success > 0) {
       toast.success(t("queue.toast.created", { success: result.success, total: result.total }));
+    }
+    if (result.success === 0 && result.canForce) {
+      setForceHint(result.firstError);
+      return;
     }
     if (result.failed > 0) {
       toast.error(t("queue.toast.failedCount", { n: result.failed }));
@@ -918,6 +930,28 @@ function CreateQueueDialog({
           <p className="text-[11px] text-muted-foreground -mt-2">
             {autoPay ? t("queue.autoPayOn") : t("queue.autoPayOff")}
           </p>
+          {/* 只有「有优惠码 + 自动付款」时才存在"被拒后要不要按原价扣钱"这个问题 */}
+          {autoPay && coupon.trim() && (
+            <div className="-mt-1">
+              <label className="flex items-center gap-2 cursor-pointer text-[13px]">
+                <Checkbox checked={couponFallback} onCheckedChange={(v) => setCouponFallback(!!v)} />
+                {t("queue.couponFallback")}
+              </label>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                {couponFallback ? t("queue.couponFallbackOn") : t("queue.couponFallbackOff")}
+              </p>
+            </div>
+          )}
+
+          {forceHint && !editing && (
+            <div className="rounded-xl border border-warning/40 bg-warning/5 px-3 py-2.5 text-[12px] space-y-2" role="alert">
+              <p>{forceHint}</p>
+              <p className="text-muted-foreground">{t("queue.forceHint")}</p>
+              <Button size="sm" variant="outline" disabled={saving} onClick={() => void handleSubmit(true)}>
+                {t("queue.forceAction")}
+              </Button>
+            </div>
+          )}
 
           {/* 可选配置:planCode 在 catalog 里 → 走 chip 选择;
                 planCode 自定义不在 catalog → 走手填。两者互斥不同时存在。 */}
@@ -1013,7 +1047,7 @@ function CreateQueueDialog({
           <Button variant="outline" onClick={handleClose} disabled={saving}>
             {t("queue.cancel")}
           </Button>
-          <Button onClick={handleSubmit} disabled={!canSubmit || saving}>
+          <Button onClick={() => void handleSubmit()} disabled={!canSubmit || saving}>
             {saving ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
@@ -1100,7 +1134,15 @@ export function QueueRow({
             <span className="font-mono font-semibold text-sm">{item.planCode}</span>
             <AccountChip accountId={item.accountId} />
             {item.preorder && <Chip tone="warning">{t("queue.preorderBadge")}</Chip>}
-            {item.coupon && <Chip>{t("queue.couponValue", { code: item.coupon })}</Chip>}
+            {item.force && <Chip tone="warning" title={t("queue.forceBadgeTitle")}>{t("queue.forceBadge")}</Chip>}
+            {item.uncertainCheckout && (
+              <Chip tone="danger" title={t("queue.uncertainBadgeTitle")}>{t("queue.uncertainBadge")}</Chip>
+            )}
+            {item.coupon && (
+              <Chip title={item.autoPay ? t(item.couponFallback ? "queue.couponFallbackOn" : "queue.couponFallbackOff") : undefined}>
+                {t("queue.couponValue", { code: item.coupon })}
+              </Chip>
+            )}
             <Chip tone="default">DC {item.datacenter.toUpperCase()}</Chip>
             {item.options && item.options.length > 0 && (
               // 以前只显示个数。而一个型号底下几套配置的差别恰恰在这里 ——

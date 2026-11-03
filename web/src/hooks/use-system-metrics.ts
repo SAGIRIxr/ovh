@@ -36,7 +36,7 @@ export interface UpdateCheck {
   updateHint?: string;
 }
 
-/** 检查上游 (gokele/ovh) 是否有新版本。
+/** 检查发版仓库 (SAGIRIxr/ovh) 是否有新版本。
  *  - 后端不缓存,收到请求就直连 GitHub
  *  - 前端 staleTime 1 小时,同一会话内访问仪表盘不会反复打 GitHub(避免触发 60 次/小时未鉴权限速)
  *  - 不监听 focus、不轮询,仅在组件 mount 且 stale 时触发一次

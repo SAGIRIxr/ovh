@@ -278,6 +278,8 @@ const pack: CommonLayerPack = {
       clear: "Clear",
       searchPlaceholder: "Search planCode / model / CPU / memory...",
       noMatch: "No matching servers",
+      useCustom: "Use custom model",
+      useCustomHint: "Models not in the catalog can be queued too; unreleased ones prompt you to force-add",
       prerelease: "Prerelease",
     },
     optionGroup: {

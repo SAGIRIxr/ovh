@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync"
 
 	"github.com/google/uuid"
 	ovhsdk "github.com/ovh/go-ovh/ovh"
@@ -45,6 +46,19 @@ type Outcome struct {
 	// PauseTask:结账结果不确定(超时+对账也失败),暂停任务等人工确认。
 	// 不计 FailureCount(不是确定性失败);不发 Fatal(用户确认无单后可恢复)
 	PauseTask bool
+	// UncertainCheckout 和 PauseTask 一起出现:暂停原因是结账结果未决。
+	// 队列会把它落到任务上,用户恢复任务后第一轮先对账,确认上一单没建成才重新下单。
+	UncertainCheckout bool
+	// PauseReason 暂停原因,写进日志
+	PauseReason string
+}
+
+// waitingKind 等目录 / 等配置开放的日志里怎么称呼这条任务
+func waitingKind(item *types.QueueItem) string {
+	if item.Preorder {
+		return "预订任务"
+	}
+	return "强制入队任务"
 }
 
 // cancelledOutcome 下单途中任务被删除时的返回。
@@ -76,13 +90,18 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 		recordFailure(state, item, errMsg)
 		return Outcome{Fatal: true, Reason: errMsg}
 	}
-	if item.Preorder && session.cart == nil {
+	if item.UncertainCheckout {
+		if outcome, done := reconcileBeforeRetry(ctx, state, client, item); done {
+			return outcome
+		}
+	}
+	if (item.Preorder || item.Force) && session.cart == nil {
 		ready, err := catalog.PreorderReady(state, item.AccountID, item.PlanCode)
 		if ctx.Err() != nil {
 			return cancelledOutcome(state, item, "等上架")
 		}
 		if err != nil || !ready {
-			state.Logger.Info(fmt.Sprintf("预订任务 %s 等待 %s 上架到下单账户的销售目录", item.ID, item.PlanCode), "purchase")
+			state.Logger.Info(fmt.Sprintf("%s %s 等待 %s 上架到下单账户的销售目录", waitingKind(item), item.ID, item.PlanCode), "purchase")
 			if err != nil {
 				state.Logger.Warn("预订任务查询销售目录失败，本轮继续等待: "+err.Error(), "purchase")
 			}
@@ -134,9 +153,13 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 	// classifyPlan 给出确定性结论时直接判 Fatal:这类任务重试到天荒地老也不会变。
 	if len(availabilities) == 0 {
 		if verdict, msg := catalog.ClassifyPlan(state, item.AccountID, item.PlanCode, "purchase"); msg != "" {
-			state.Logger.Error(fmt.Sprintf("%s（判定 %d）", msg, verdict), "purchase")
-			recordFailure(state, item, msg)
-			return Outcome{Fatal: true, Reason: msg}
+			// 强制入队只放过「哪里都查不到」这一类(还没上架的新型号),
+			// 跨区 / 非 Eco 是确定性买不到,照样判死。
+			if !(item.Force && verdict == catalog.PlanVerdictNoSuchPlan) {
+				state.Logger.Error(fmt.Sprintf("%s（判定 %d）", msg, verdict), "purchase")
+				recordFailure(state, item, msg)
+				return Outcome{Fatal: true, Reason: msg}
+			}
 		}
 	}
 
@@ -312,11 +335,15 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 		// checkout 超时/传输层失败 ≠ 下单失败:请求可能已经到达 OVH 且订单已建,
 		// 只是我方没等到响应。这时任务会重试 → 新车再 checkout → **买两台**
 		// (autoPay 开着就是重复扣款)。所以 transient 失败先对账:
-		// GET /me/order?dateFrom=本轮开始 查有没有本机型的新订单,有就按成功处理
+		// GET /me/order?date.from=本轮开始(返回订单号列表),逐笔看明细里有没有本机型,有就按成功处理
 		if checkoutUncertain(err) {
-			if oid, url := reconcileOrder(state, client, item, attemptStart); oid != "" {
+			oid, url, recErr := reconcileOrder(state, client, item, attemptStart)
+			if oid != "" {
 				state.Logger.Warn(fmt.Sprintf("checkout 报 transient 失败但对账发现订单已建(#%s),按成功处理,不再重试", oid), "purchase")
 				return handleReconciledOrder(state, item, oid, url, tl, timingKey, couponWarning)
+			}
+			if recErr != nil {
+				state.Logger.Warn("checkout 对账查询失败: "+recErr.Error(), "purchase")
 			}
 			// 对账也失败(429/超时/panic 兜底返回空):OVH 侧订单状态未知。
 			// 直接重试 = 可能买两台(第一单已建但 history 没记,120s 闸门也不认识它)。
@@ -327,8 +354,8 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 				"⚠️ 抢购 %s@%s 结账结果不明确,无法确认订单是否已创建\n\n"+
 					"任务已暂停。请到 OVH 订单页查看是否已有一笔未付订单:\n"+
 					"- 有:等付款即可,任务不需要恢复\n"+
-					"- 没有:在队列页把任务恢复运行", item.PlanCode, item.Datacenter), nil)
-			return Outcome{Attempted: false, PauseTask: true}
+					"- 没有:在队列页把任务恢复运行(恢复后会先自动对账一次)", item.PlanCode, item.Datacenter), nil)
+			return Outcome{Attempted: false, PauseTask: true, UncertainCheckout: true, PauseReason: "结账结果不确定,等人工确认"}
 		}
 		// checkout 这一步最要紧:补货瞬间大家都在下单,429 是常态。
 		// 把它记成一次"真正的失败尝试"会让任务在唯一有货的那一分钟里自己判死。
@@ -905,43 +932,77 @@ func BuildOrderSuccessMessage(item *types.QueueItem, orderID, managerURL string)
 	return msg
 }
 
+// reconcileMu 串行化「对账 + 认领订单号」。同机型同机房的两个任务同时结账超时,
+// 并发对账会把同一笔订单各认领一次,结果少抢一台。
+var (
+	reconcileMu     sync.Mutex
+	claimedOrderIDs = map[string]bool{} // 本进程里对账认领过、还没写进 history 的订单号
+)
+
 // reconcileOrder checkout 报 transient 失败(超时/429/5xx)后查 /me/order 对账:
-// 请求可能已到达 OVH 且订单已建,直接重试会买两台。dateFrom 取本轮开始时间,
-// 只认这之后出现的同 planCode 订单 —— 之前的历史订单不算本轮的。
-func reconcileOrder(state *app.State, client *ovhsdk.Client, item *types.QueueItem, since time.Time) (orderID, orderURL string) {
-	state.QueueMu.Lock()
-	ambiguous := false
-	for _, other := range state.Queue {
-		if other.ID != item.ID && other.AccountID == item.AccountID && other.PlanCode == item.PlanCode && (other.Status == "running" || other.Status == "completed") {
-			ambiguous = true
-			break
-		}
-	}
-	state.QueueMu.Unlock()
-	if ambiguous {
-		return "", ""
-	}
-	planCode := item.PlanCode
+// 请求可能已到达 OVH 且订单已建,直接重试会买两台。
+// 只认 since 之后、明细里带本机型、机房不冲突、且没被别的任务认领过的订单。
+// err 非空 = 订单列表或明细没读全,结论不可靠。
+func reconcileOrder(state *app.State, client *ovhsdk.Client, item *types.QueueItem, since time.Time) (orderID, orderURL string, err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			// 对账本身失败不能影响主流程:宁可按原逻辑重试(有 120s 成功史闸门兜底)
+			// 对账本身出错不能影响主流程,按"没查清"处理(调用方会暂停任务)
 			state.Logger.Warn(fmt.Sprintf("checkout 对账 panic(已忽略): %v", r), "purchase")
-			orderID, orderURL = "", ""
+			orderID, orderURL, err = "", "", fmt.Errorf("reconcile panic: %v", r)
 		}
 	}()
-	var orders []map[string]interface{}
-	q := "/me/order?dateFrom=" + url.QueryEscape(since.UTC().Format("2006-01-02")) + "&planCode=" + url.QueryEscape(planCode)
-	if err := client.Get(q, &orders); err != nil {
-		state.Logger.Warn("checkout 对账查询失败(按未建单处理): "+err.Error(), "purchase")
-		return "", ""
+	acc, _ := state.FindAccount(item.AccountID)
+
+	reconcileMu.Lock()
+	defer reconcileMu.Unlock()
+	excluded := map[string]bool{}
+	for id := range claimedOrderIDs {
+		excluded[id] = true
 	}
-	for _, o := range orders {
-		if id := numconv.ToString(o["orderId"]); id != "" {
-			u, _ := o["url"].(string)
-			return id, u
+	state.HistoryMu.Lock()
+	for _, h := range state.History {
+		if h.OrderID != "" {
+			excluded[h.OrderID] = true
 		}
 	}
-	return "", ""
+	state.HistoryMu.Unlock()
+	orderID, orderURL, err = ReconcileRecentOrderEx(client, acc.Endpoint, item.PlanCode, since, ReconcileOptions{
+		Datacenter:       ovh.ConvertDisplayDCToAPIDC(item.Datacenter),
+		ExcludedOrderIDs: excluded,
+	})
+	if orderID != "" {
+		claimedOrderIDs[orderID] = true
+	}
+	return orderID, orderURL, err
+}
+
+// reconcileBeforeRetry 任务上一次结账结果未决、被用户恢复后,第一轮先对账。
+// 用户可能没去 OVH 核对就点了恢复;直接重新下单的话,上一单若已建成就是买两台。
+// done=true 时调用方直接返回 outcome。
+func reconcileBeforeRetry(ctx context.Context, state *app.State, client *ovhsdk.Client, item *types.QueueItem) (Outcome, bool) {
+	since := time.Now().Add(-30 * time.Minute)
+	if t, ok := types.ParseTS(item.UncertainTime); ok {
+		since = t.Add(-2 * time.Minute)
+	}
+	oid, url, err := reconcileOrder(state, client, item, since)
+	if ctx.Err() != nil {
+		return cancelledOutcome(state, item, "恢复前对账"), true
+	}
+	if oid != "" {
+		state.Logger.Warn(fmt.Sprintf("恢复前对账发现上一次未决的结账已经建单(#%s),按成功处理,不再下单", oid), "purchase")
+		return handleReconciledOrder(state, item, oid, url, newTimeline(), item.ID, ""), true
+	}
+	if err != nil {
+		state.Logger.Warn("恢复前对账仍查不清,再次暂停: "+err.Error(), "purchase")
+		notify.Broadcast(state, fmt.Sprintf(
+			"⚠️ 抢购 %s@%s 恢复前对账失败,仍无法确认上一次结账是否已建单,任务已再次暂停。\n"+
+				"请到 OVH 订单页核对后再恢复。", item.PlanCode, item.Datacenter), nil)
+		return Outcome{PauseTask: true, UncertainCheckout: true, PauseReason: "恢复前对账失败"}, true
+	}
+	state.Logger.Info(fmt.Sprintf("恢复前对账:%s@%s 上一次结账没有建单,继续抢购", item.PlanCode, item.Datacenter), "purchase")
+	state.ClearUncertainCheckout(item.ID)
+	item.UncertainCheckout = false
+	return Outcome{}, false
 }
 
 // handleReconciledOrder 对账发现订单已建:按成功路径走完(记成功/异步补详情/通知)

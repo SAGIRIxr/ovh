@@ -18,7 +18,13 @@ export interface QueueItem {
   /** 下单成功后用 OVH 默认支付方式自动付款(显式开关,默认关) */
   autoPay?: boolean;
   coupon?: string;
+  /** 优惠码被拒时仍按原价自动付款(只在 autoPay 时有意义) */
+  couponFallback?: boolean;
   preorder?: boolean;
+  /** 强制入队:型号还没上架也一直刷 */
+  force?: boolean;
+  /** 上次结账超时且没对上账,恢复后会先对账 */
+  uncertainCheckout?: boolean;
   options: string[];
   status: QueueStatus;
   createdAt: string;
@@ -95,7 +101,9 @@ export function useCreateQueueItem() {
       quantity?: number;
       autoPay?: boolean;
       coupon?: string;
+      couponFallback?: boolean;
       preorder?: boolean;
+      force?: boolean;
     }) => {
       const dcs = payload.datacenters;
       // 上界以前完全没有:填 9999 × 5 个机房 = 近 5 万次串行 POST。
@@ -117,6 +125,8 @@ export function useCreateQueueItem() {
       // 第一条失败原因要留下来。以前是 catch 里 failed++ 就完了,
       // 用户看到「N 个任务创建失败」却不知道为什么(比如撞上了队列总量闸门)。
       let firstError = "";
+      // 后端判定「三个大区都查不到这个型号」时会带 can_force:可以改成强制入队重试
+      let canForce = false;
       for (const dc of dcs) {
         for (let i = 0; i < qty; i++) {
           try {
@@ -128,17 +138,21 @@ export function useCreateQueueItem() {
               options: payload.options || [],
               autoPay: payload.autoPay ?? false,
               preorder: payload.preorder ?? false,
+              force: payload.force ?? false,
               coupon: payload.coupon?.trim() || undefined,
+              couponFallback: payload.couponFallback ?? false,
             });
             success++;
           } catch (e: any) {
             failed++;
             if (!firstError) firstError = errorMessage(e);
+            if (e?.response?.data?.can_force) canForce = true;
           }
         }
       }
-      if (failed > 0 && firstError) toast.error(i18n.t("hooksMsg.queue.someFailed", { reason: firstError }));
-      return { success, failed, total: dcs.length * qty, firstError };
+      // 可强制入队的失败交给调用方弹选项,这里不再重复报错
+      if (failed > 0 && firstError && !canForce) toast.error(i18n.t("hooksMsg.queue.someFailed", { reason: firstError }));
+      return { success, failed, total: dcs.length * qty, firstError, canForce };
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.queue.list() });
@@ -151,7 +165,7 @@ export function useCreateQueueItem() {
 export function useUpdateQueueItem() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ id, ...patch }: { id: string; datacenter: string; options: string[]; retryInterval: number; autoPay: boolean; coupon: string }) =>
+    mutationFn: async ({ id, ...patch }: { id: string; datacenter: string; options: string[]; retryInterval: number; autoPay: boolean; coupon: string; couponFallback: boolean }) =>
       (await api.put(`/queue/${encodeURIComponent(id)}`, patch)).data,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.queue.list() });

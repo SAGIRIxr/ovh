@@ -263,6 +263,8 @@ export const commonLayerZh = {
       clear: "清空",
       searchPlaceholder: "搜索 planCode / 型号 / CPU / 内存...",
       noMatch: "没有匹配的服务器",
+      useCustom: "使用自定义型号",
+      useCustomHint: "目录里没有的型号也能挂任务;还没上架时创建会提示强制添加",
       prerelease: "预上架",
     },
     optionGroup: {

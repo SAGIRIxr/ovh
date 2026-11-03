@@ -30,6 +30,7 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 		status                                int
 		preorder, cancel, reconciled, network bool
 		checkout, warning                     bool
+		autoPay, fallback, pause              bool
 	}{
 		{name: "blank", coupon: "  ", checkout: true},
 		{name: "accepted", coupon: " Save10 ", status: 200, checkout: true},
@@ -41,6 +42,9 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 		{name: "server error", coupon: "Save10", status: 503},
 		{name: "unrecognized transport error", coupon: "Save10", network: true},
 		{name: "cancelled", coupon: "Save10", cancel: true},
+		// 开了自动付款:优惠码被拒默认暂停,不能悄悄按原价扣钱;勾了「仍付款」才继续结账
+		{name: "auto-pay rejection pauses", coupon: "Save10", status: 400, autoPay: true, pause: true},
+		{name: "auto-pay rejection with fallback", coupon: "Save10", status: 400, autoPay: true, fallback: true, checkout: true, warning: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -121,8 +125,8 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatal(err)
 					}
-					if payload["autoPayWithPreferredPaymentMethod"] != false {
-						t.Error("coupon changed auto-pay default")
+					if payload["autoPayWithPreferredPaymentMethod"] != tc.autoPay {
+						t.Error("coupon changed auto-pay setting")
 					}
 					// No real order; omit ID so the fixture also starts no detail-fetch goroutine.
 					body = `{}`
@@ -143,7 +147,7 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 				t.Fatal(err)
 			}
 			client.Client = &http.Client{Transport: transport}
-			item := &types.QueueItem{ID: "coupon-task", AccountID: "eu", PlanCode: "24sk202", Datacenter: "gra", Coupon: tc.coupon, Preorder: tc.preorder}
+			item := &types.QueueItem{ID: "coupon-task", AccountID: "eu", PlanCode: "24sk202", Datacenter: "gra", Coupon: tc.coupon, Preorder: tc.preorder, AutoPay: tc.autoPay, CouponFallback: tc.fallback}
 			outcome := PurchaseServer(ctx, st, item)
 			wantCoupon := 1
 			if strings.TrimSpace(tc.coupon) == "" {
@@ -153,7 +157,7 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 			if tc.checkout {
 				wantCheckout = 1
 			}
-			if couponCalls != wantCoupon || checkoutCalls != wantCheckout || outcome.Success != tc.checkout || outcome.PauseTask || outcome.Attempted || outcome.Cancelled != tc.cancel {
+			if couponCalls != wantCoupon || checkoutCalls != wantCheckout || outcome.Success != tc.checkout || outcome.PauseTask != tc.pause || outcome.Attempted || outcome.Cancelled != tc.cancel {
 				t.Fatalf("unexpected flow: outcome=%+v coupon=%d checkout=%d steps=%v", outcome, couponCalls, checkoutCalls, steps)
 			}
 			if tc.checkout {
@@ -167,6 +171,9 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 				if tc.warning && !strings.Contains(history[0].CouponWarning, "未使用优惠码") {
 					t.Fatal(history[0].CouponWarning)
 				}
+			}
+			if tc.pause && (len(messages) != 1 || !strings.Contains(messages[0], "已暂停")) {
+				t.Fatalf("paused coupon task must notify: %v", messages)
 			}
 			if !tc.checkout && (len(steps) == 0 || steps[len(steps)-1] != "cleanup") {
 				t.Fatalf("failed cart was not cleaned: %v", steps)

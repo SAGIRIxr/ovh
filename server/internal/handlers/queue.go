@@ -32,6 +32,9 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 			AutoPay  bool   `json:"autoPay"`
 			Preorder bool   `json:"preorder"`
 			Coupon   string `json:"coupon"`
+			// Force 强制入队还没上架的型号;CouponFallback 优惠码被拒时仍按原价自动付款
+			Force          bool `json:"force"`
+			CouponFallback bool `json:"couponFallback"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "任务参数格式不正确"})
@@ -58,10 +61,16 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 		// → 按 retryInterval 永远重试,日志里永远只有一句"当前无货",用户看不出错在哪。
 		// 所以在这里就说清楚,而不是让它在后台空转到天荒地老。
 		// 探测失败(catalog.PlanVerdictUnknown)不拦 —— 一次网络瞬断不该让用户下不了单。
+		// 用户明确选了强制入队时,只放过「哪里都查不到」(还没上架的新型号);
+		// 跨区 / 非 Eco 是确定性买不到,强制也不放。can_force 告诉前端能不能提供这个选项。
 		if verdict, hint := catalog.ClassifyPlan(state, body.AccountID, body.PlanCode, "queue"); hint != "" && !(body.Preorder && verdict == catalog.PlanVerdictPrerelease) {
-			state.Logger.Warn(fmt.Sprintf("[queue] 拒绝任务(判定 %d): %s", verdict, hint), "queue")
-			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": hint})
-			return
+			if body.Force && verdict == catalog.PlanVerdictNoSuchPlan {
+				state.Logger.Warn(fmt.Sprintf("[queue] 强制添加未上架型号 %s 在 %s: %s", body.PlanCode, body.Datacenter, hint), "queue")
+			} else {
+				state.Logger.Warn(fmt.Sprintf("[queue] 拒绝任务(判定 %d): %s", verdict, hint), "queue")
+				c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": hint, "can_force": verdict == catalog.PlanVerdictNoSuchPlan})
+				return
+			}
 		}
 		// 没给 / 给 0 = 用全局默认(设置页可改);超出区间夹回来
 		body.RetryInterval = types.ClampRetryInterval(body.RetryInterval, state.Config.RetryInterval())
@@ -80,6 +89,9 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 			AutoPay:       body.AutoPay,
 			Preorder:      body.Preorder,
 			Coupon:        strings.TrimSpace(body.Coupon),
+			Force:         body.Force,
+			// 只在自动付款时有意义,不开自动付款的话被拒也只是生成一张未付款订单
+			CouponFallback: body.CouponFallback && body.AutoPay,
 		}
 		// 入队 + 落库是一件事:EnqueueItems 失败会把这条从内存撤回,
 		// 不留"这次能跑但重启就丢"的半成功任务
@@ -143,17 +155,18 @@ func RemoveQueueItem(state *app.State) gin.HandlerFunc {
 func UpdateQueueItem(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var body struct {
-			Datacenter    string   `json:"datacenter"`
-			Options       []string `json:"options"`
-			RetryInterval int      `json:"retryInterval"`
-			AutoPay       bool     `json:"autoPay"`
-			Coupon        string   `json:"coupon"`
+			Datacenter     string   `json:"datacenter"`
+			Options        []string `json:"options"`
+			RetryInterval  int      `json:"retryInterval"`
+			AutoPay        bool     `json:"autoPay"`
+			Coupon         string   `json:"coupon"`
+			CouponFallback bool     `json:"couponFallback"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Datacenter) == "" || body.RetryInterval < types.MinRetryInterval || body.RetryInterval > types.MaxRetryInterval {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "请填写机房及有效的重试间隔"})
 			return
 		}
-		if err := state.UpdateQueueItem(c.Param("id"), strings.TrimSpace(body.Datacenter), body.Options, body.RetryInterval, body.AutoPay, strings.TrimSpace(body.Coupon)); err != nil {
+		if err := state.UpdateQueueItem(c.Param("id"), strings.TrimSpace(body.Datacenter), body.Options, body.RetryInterval, body.AutoPay, strings.TrimSpace(body.Coupon), body.CouponFallback); err != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(err, app.ErrQueueNotFound) {
 				status = http.StatusNotFound

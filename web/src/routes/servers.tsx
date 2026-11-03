@@ -552,6 +552,7 @@ function DetailContent({
   // 默认不自动付款:自动扣钱必须是用户显式打开的
   const [autoPay, setAutoPay] = useState(false);
   const [coupon, setCoupon] = useState("");
+  const [couponFallback, setCouponFallback] = useState(false);
   const toggleDC = (code: string) =>
     setSelectedDCs((prev) => (prev.includes(code) ? prev.filter((c) => c !== code) : [...prev, code]));
   // 和后端同一套上限:界面上先把数量收住,别让用户看到一个建不出来的数字。
@@ -899,6 +900,12 @@ function DetailContent({
               {t("servers.detail.autoPayLabel")}
             </label>
           )}
+          {selectedDCs.length > 0 && autoPay && coupon.trim() && (
+            <label className="flex items-center gap-1.5 mt-1 cursor-pointer text-[11px]" title={couponFallback ? t("queue.couponFallbackOn") : t("queue.couponFallbackOff")}>
+              <Checkbox checked={couponFallback} onCheckedChange={(v) => setCouponFallback(!!v)} />
+              {t("queue.couponFallback")}
+            </label>
+          )}
         </div>
         <Button variant="outline" onClick={onClose} disabled={create.isPending}>
           {t("servers.detail.close")}
@@ -947,6 +954,7 @@ function DetailContent({
               options: selectedValues,
               autoPay,
               coupon,
+              couponFallback: autoPay && couponFallback,
               preorder: !!server.prerelease,
             });
             if (result.success > 0) {
