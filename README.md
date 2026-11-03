@@ -186,6 +186,21 @@ Windows 把产物名改成 `ovh-server.exe` 即可;交叉编译加 `GOOS=linux G
 
 > Release 页提供 Windows amd64 / Linux amd64 / Linux arm64 三个预编译产物,不想自己编译可以直接下。
 
+### 放在反向代理后面(Lucky / Nginx / Caddy)
+
+VPS 上常见的做法是面板只在本机监听,由 Lucky 之类的反代套 HTTPS 和域名对外。要注意四件事:
+
+1. **端口只绑本机**:compose 里写 `127.0.0.1:20000:20000`,反代目标填 `http://127.0.0.1:20000`。
+   绑在 `0.0.0.0` 的话,别人可以绕过反代直接用明文 http 连端口,访问密钥一路裸奔。
+2. **设 `TRUSTED_PROXIES`**:不设的话面板看到的所有请求都来自反代自己,密钥限流变成全站共用一个计数 ——
+   外面的人猜错 10 次,你自己也被锁 5 分钟。
+   - 二进制部署、反代在同一台机器:`TRUSTED_PROXIES=127.0.0.1`
+   - Docker 部署、反代在宿主机(Lucky host 网络就是这种):填容器网络的网关,
+     用 `docker inspect -f '{{range .NetworkSettings.Networks}}{{.Gateway}}{{end}}' <容器名>` 查,一般是 `172.x.0.1`
+   - 反代要带上 `X-Forwarded-For`(Lucky、Nginx 默认都会带)。漏设时面板日志会提醒一次。
+3. **别改写 Host 头**:浏览器的同源判断按 Host 比对,反代把 Host 改成 `127.0.0.1:20000` 的话,网页里所有写操作都会 403。
+4. **App 配对**:反代带了 `X-Forwarded-Proto: https` 时二维码自动用 https;不带的话设 `PUBLIC_BASE_URL=https://你的域名`。
+
 ### 方式 C:开发(前后端分开跑)
 
 ```bash

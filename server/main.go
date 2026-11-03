@@ -210,6 +210,21 @@ func main() {
 	if err := r.SetTrustedProxies(trusted); err != nil {
 		console.Warn("SetTrustedProxies 失败,将按不信任代理处理", "err", err)
 	}
+	// 在 Lucky / Nginx 后面跑却没声明 TRUSTED_PROXIES:所有请求的来源都是反代自己的地址,
+	// 按 IP 的密钥限流就成了全站共用一个桶 —— 外面的人猜错 10 次,你自己也被锁 5 分钟。
+	// 看到第一个「本机/内网地址 + 带 X-Forwarded-For」的请求时提醒一次
+	if len(trusted) == 0 {
+		var proxyWarned atomic.Bool
+		r.Use(func(c *gin.Context) {
+			if !proxyWarned.Load() && c.GetHeader("X-Forwarded-For") != "" {
+				if ip := net.ParseIP(c.RemoteIP()); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) && proxyWarned.CompareAndSwap(false, true) {
+					console.Warn("⚠️  请求经反向代理转发(来自 "+c.RemoteIP()+"),但没设 TRUSTED_PROXIES:密钥限流和日志都会把所有人算成这一个地址。"+
+						"在配置里加 TRUSTED_PROXIES="+c.RemoteIP()+" 后重启")
+				}
+			}
+			c.Next()
+		})
+	}
 	r.Use(gin.Recovery())
 	// CORS 只放行同机来源。
 	//
