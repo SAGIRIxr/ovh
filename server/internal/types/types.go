@@ -177,8 +177,11 @@ type QueueItem struct {
 	CouponFallback bool `json:"couponFallback,omitempty"`
 	// UncertainCheckout 上一次结账超时且对账没查清,任务因此被暂停。
 	// 恢复后第一轮先去 OVH 对账,确认没建单才重新下单。UncertainTime 是那次结账的时间。
-	UncertainCheckout  bool   `json:"uncertainCheckout,omitempty"`
-	UncertainTime      string `json:"uncertainTime,omitempty"`
+	UncertainCheckout bool   `json:"uncertainCheckout,omitempty"`
+	UncertainTime     string `json:"uncertainTime,omitempty"`
+	// FQN 手填的整套硬件组合(<planCode>.<内存段>.<硬盘段>)。非空时只认库存里这一条,
+	// 其它组合有货也按无货继续等,不会退而求其次下到别的配置
+	FQN                string `json:"fqn,omitempty"`
 	ConfigSniperTaskID string `json:"configSniperTaskId,omitempty"`
 }
 

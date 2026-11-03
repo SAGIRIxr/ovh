@@ -56,6 +56,7 @@ import { TimingChip } from "@/components/common/TimingChip";
 import { AccountChip } from "@/components/common/AccountChip";
 import { PlanCodeCombobox } from "@/components/common/PlanCodeCombobox";
 import { OptionGroupSection } from "@/components/common/OptionGroupSection";
+import { ManualConfigSection, fqnHardware, type ManualConfig } from "@/components/common/ManualConfigSection";
 import { describeOptionCodes, groupOptions, type OptionGroupKey } from "@/lib/option-groups";
 import { splitList } from "@/lib/split-list";
 import { mergeStockPlans } from "@/lib/stock-plans";
@@ -533,6 +534,12 @@ function CreateQueueDialog({
   const [picked, setPicked] = useState<Partial<Record<OptionGroupKey, string>>>({});
   // 手填的额外 addon planCode(catalog 里没分组覆盖到的、或用户想加的特殊 addon)
   const [extraInput, setExtraInput] = useState("");
+  // 手动填写区:目录内机型要展开才生效;manualFqn 锁定整套硬件组合
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualFqn, setManualFqn] = useState("");
+  // 整段粘贴带了 PLANCODE 时型号会跟着变,下面「换型号就清空配置」的 effect
+  // 不能把刚粘进来的 OPTIONS / FQN 吃掉:记下是哪个型号的粘贴,换到别的型号才作废
+  const pastedForRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (open) {
@@ -564,6 +571,10 @@ function CreateQueueDialog({
     const selectionKey = `${code}|${!!matchedServer}`;
     if (selectionKey === prevPlanCodeRef.current) return;
     prevPlanCodeRef.current = selectionKey;
+    if (pastedForRef.current !== null) {
+      if (pastedForRef.current === code) return;
+      pastedForRef.current = null;
+    }
     if (initialOptions && code === (initialPlanCode || "").trim()) {
       // 走"外部带 initialOptions 进来"分支:
       //   - 能映射到 chip 组的塞进 picked
@@ -587,8 +598,24 @@ function CreateQueueDialog({
     } else {
       setPicked({});
       setExtraInput("");
+      setManualFqn("");
     }
   }, [planCode, initialOptions, initialPlanCode, matchedServer]);
+
+  const handlePaste = (p: ManualConfig) => {
+    const code = (p.planCode || planCode).trim();
+    // 换了型号:上一个型号的配置一律作废,粘贴里没给的项清空
+    const switched = code !== planCode.trim();
+    pastedForRef.current = code;
+    if (p.planCode) setPlanCode(code);
+    if (p.options !== undefined || switched) {
+      // 粘进来的是一整套配置,替换掉 chip 上点过的,不和它混在一起
+      setPicked({});
+      setExtraInput(p.options ?? "");
+    }
+    if (p.fqn !== undefined || switched) setManualFqn(p.fqn ?? "");
+    if (p.fqn) setManualOpen(true);
+  };
 
   /** 按组拆分该机型的所有可选 addon */
   const grouped = useMemo(
@@ -612,6 +639,13 @@ function CreateQueueDialog({
 
   // option chip 的绿/红点:跟服务器列表对话框同一套逻辑
   const variants = matchedServer ? variantIndex[matchedServer.planCode] : undefined;
+  // 目录里没有、库存接口里却已经有记录的型号(还没进销售目录的新品),
+  // 拿它的 FQN 给出可点的组合按钮
+  const planVariants = variantIndex[planCode.trim()];
+  // 目录里没有的型号只能手填,手动区常开;目录内机型展开了才算数
+  const manualActive = manualOpen || !matchedServer;
+  const effectiveFqn = manualActive ? manualFqn.trim() : "";
+  const fqnMismatch = effectiveFqn !== "" && !effectiveFqn.toLowerCase().startsWith(planCode.trim().toLowerCase() + ".");
   const prereleaseMismatch = !!matchedServer?.prerelease && parsedOptions.length > 0 &&
     !!variants && !variants.some((v) => variantCoversAll(v, parsedOptions));
   const optionHasStock = (groupKey: OptionGroupKey, value: string): boolean => {
@@ -632,7 +666,7 @@ function CreateQueueDialog({
   const orderPlan = clampOrderPlan(datacenters.length, Number(quantity) || 1);
   const qty = orderPlan.quantity;
   const totalTasks = orderPlan.total;
-  const canSubmit = !!activeAcc && planCode.trim().length > 0 && datacenters.length > 0 && qty > 0 && !prereleaseMismatch;
+  const canSubmit = !!activeAcc && planCode.trim().length > 0 && datacenters.length > 0 && qty > 0 && !prereleaseMismatch && !fqnMismatch;
 
   const reset = () => {
     setPlanCode("");
@@ -646,6 +680,9 @@ function CreateQueueDialog({
     setRetryInterval(String(cfgDefault));
     setPicked({});
     setExtraInput("");
+    setManualOpen(false);
+    setManualFqn("");
+    pastedForRef.current = null;
     prevPlanCodeRef.current = "";
   };
 
@@ -689,6 +726,7 @@ function CreateQueueDialog({
       couponFallback: autoPay && couponFallback,
       preorder: !!matchedServer?.prerelease,
       force,
+      fqn: effectiveFqn || undefined,
     });
     if (result.success > 0) {
       toast.success(t("queue.toast.created", { success: result.success, total: result.total }));
@@ -1006,9 +1044,30 @@ function CreateQueueDialog({
 
             {grouped && (editing || extraInput) && <Input className="mt-3" aria-label={t("queue.extraOptionsPlaceholder")}
               placeholder={t("queue.extraOptionsPlaceholder")} value={extraInput} onChange={(e) => setExtraInput(e.target.value)} />}
-            {parsedOptions.length > 0 && (
+            {/* 编辑时不改 FQN:后端的编辑接口不收它,想换组合就删了重建 */}
+            {!editing && (
+              <div className="mt-3">
+                <ManualConfigSection
+                  open={manualOpen}
+                  onOpenChange={setManualOpen}
+                  forced={!grouped}
+                  planCode={planCode}
+                  fqn={manualFqn}
+                  onFqnChange={setManualFqn}
+                  onPaste={handlePaste}
+                  variants={planVariants}
+                  datacenters={datacenters}
+                />
+              </div>
+            )}
+            {(parsedOptions.length > 0 || effectiveFqn) && (
               <div className="flex flex-wrap gap-1.5 mt-3 pt-3 border-t border-border">
                 <span className="text-[11px] text-muted-foreground">{t("queue.optionsSelected")}</span>
+                {effectiveFqn && (
+                  <Chip tone="info" className="font-mono" title={t("queue.manual.fqnHint")}>
+                    FQN {fqnHardware(effectiveFqn) || effectiveFqn}
+                  </Chip>
+                )}
                 {parsedOptions.map((opt, i) => (
                   <Chip key={`${opt}-${i}`} tone="default" className="font-mono">
                     {opt}
@@ -1152,6 +1211,11 @@ export function QueueRow({
               // 机型下架或目录没拉到时也能显示。
               <Chip tone="default" title={item.options.join("\n")}>
                 {describeOptionCodes(item.options)}
+              </Chip>
+            )}
+            {item.fqn && (
+              <Chip tone="info" className="font-mono" title={t("queue.manual.fqnRowTitle", { fqn: item.fqn })}>
+                FQN {fqnHardware(item.fqn)}
               </Chip>
             )}
             {item.autoPay && (

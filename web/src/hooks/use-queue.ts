@@ -25,6 +25,8 @@ export interface QueueItem {
   force?: boolean;
   /** 上次结账超时且没对上账,恢复后会先对账 */
   uncertainCheckout?: boolean;
+  /** 锁定的整套硬件组合,只在这条 FQN 有货时下单 */
+  fqn?: string;
   options: string[];
   status: QueueStatus;
   createdAt: string;
@@ -104,6 +106,8 @@ export function useCreateQueueItem() {
       couponFallback?: boolean;
       preorder?: boolean;
       force?: boolean;
+      /** 整套硬件组合(<planCode>.<段>...),只在这条 FQN 有货时下单 */
+      fqn?: string;
     }) => {
       const dcs = payload.datacenters;
       // 上界以前完全没有:填 9999 × 5 个机房 = 近 5 万次串行 POST。
@@ -141,6 +145,7 @@ export function useCreateQueueItem() {
               force: payload.force ?? false,
               coupon: payload.coupon?.trim() || undefined,
               couponFallback: payload.couponFallback ?? false,
+              fqn: payload.fqn?.trim() || undefined,
             });
             success++;
           } catch (e: any) {

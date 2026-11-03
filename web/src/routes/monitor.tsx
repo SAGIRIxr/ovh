@@ -51,6 +51,7 @@ import { useNotifyGate } from "@/hooks/use-notify-channels";
 import { toast } from "sonner";
 import { useServers } from "@/hooks/use-servers";
 import { describeOptionCodes, groupOptions, type OptionGroupKey } from "@/lib/option-groups";
+import { ManualConfigSection, type ManualConfig } from "@/components/common/ManualConfigSection";
 import { OptionGroupSection } from "@/components/common/OptionGroupSection";
 import { splitList } from "@/lib/split-list";
 
@@ -582,6 +583,7 @@ function AddSubscriptionDialog({
   const [picked, setPicked] = useState<Partial<Record<OptionGroupKey, string>>>({});
   // 型号不在目录里(手输的冷门机型 / 目录没拉到)时退回手填,跟下单弹窗同一套策略
   const [extraOptions, setExtraOptions] = useState("");
+  const [pasteOpen, setPasteOpen] = useState(false);
   const serversQ = useServers();
   const matchedServer = useMemo(
     () => (serversQ.data || []).find((sv) => sv.planCode === planCode.trim()),
@@ -622,6 +624,20 @@ function AddSubscriptionDialog({
     setAutoPay(false);
     setPicked({});
     setExtraOptions("");
+    setPasteOpen(false);
+  };
+
+  // 订阅没有 FQN 字段:只给了 FQN 没给 OPTIONS 时,拿它的硬件段当配置 ——
+  // 判有货和下单匹配 addon 都认这种短前缀
+  const handlePaste = (p: ManualConfig) => {
+    const switched = !!p.planCode && p.planCode.trim() !== planCode.trim();
+    if (p.planCode) setPlanCode(p.planCode.trim());
+    // 换了型号又没给配置:上一个型号的配置作废
+    const opts = p.options ?? (p.fqn ? p.fqn.split(".").slice(1).join(", ") : switched ? "" : undefined);
+    if (opts !== undefined) {
+      setPicked({});
+      setExtraOptions(opts);
+    }
   };
 
   // 每次打开都按当前 editing 重灌一次表单。依赖里带上 open,
@@ -854,6 +870,19 @@ function AddSubscriptionDialog({
                 ? t("monitor.dialog.optionsSelected", { n: chosenOptions.length })
                 : t("monitor.dialog.optionsEmptyHint")}
             </p>
+            {!isEdit && (
+              <div className="mt-2">
+                <ManualConfigSection
+                  open={pasteOpen}
+                  onOpenChange={setPasteOpen}
+                  planCode={planCode}
+                  fqn=""
+                  onFqnChange={() => {}}
+                  onPaste={handlePaste}
+                  showFqn={false}
+                />
+              </div>
+            )}
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

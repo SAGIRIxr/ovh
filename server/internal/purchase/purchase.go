@@ -169,7 +169,10 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 	// "32G+HDD 有货" 不等于 "用户要的 64G+NVMe 有货"。用户指定了硬件选项时，
 	// 只在 FQN 段集合覆盖了这些选项的条目里判有货。
 	wantedHW := fqnRelevantOptions(availabilities, item.Options)
-	if item.Preorder {
+	// 手填了 FQN 时组合已由下面的精确过滤锁死,options 可能是带机型后缀的完整 planCode,
+	// 不能再走预订的逐段全等匹配(永远对不上,任务会一直空等)
+	preorderSegs := item.Preorder && item.FQN == ""
+	if preorderSegs {
 		// 预订保存的是原始 FQN 硬件段;参数消失也不能忽略它后改买其他配置。
 		wantedHW = item.Options
 	}
@@ -179,7 +182,7 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 		for _, av := range availabilities {
 			fqn, _ := av["fqn"].(string)
 			matches := fqnCoversOptions(fqn, wantedHW)
-			if item.Preorder {
+			if preorderSegs {
 				matches = preorderFQNCoversOptions(fqn, wantedHW)
 			}
 			if matches {
@@ -198,6 +201,23 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 			recordTiming(timingKey, tl, "unavailable")
 			return Outcome{}
 		}
+	}
+
+	// 手填了 FQN:只认这一条组合,和上面的选项过滤是"且"的关系。
+	// 库存里还没有这条(新品陆续开放配置)按无货继续等,而不是判死
+	if item.FQN != "" {
+		exact := []map[string]interface{}{}
+		for _, av := range candidates {
+			if fqn, _ := av["fqn"].(string); strings.EqualFold(fqn, item.FQN) {
+				exact = append(exact, av)
+			}
+		}
+		if len(exact) == 0 {
+			state.Logger.Info(fmt.Sprintf("服务器 %s 库存里暂无指定组合 %s，视为无货", item.PlanCode, item.FQN), "purchase")
+			recordTiming(timingKey, tl, "unavailable")
+			return Outcome{}
+		}
+		candidates = exact
 	}
 
 	foundAvailable := false

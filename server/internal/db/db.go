@@ -87,6 +87,7 @@ func (db *DB) migrate() error {
 		{"coupon_fallback", "INTEGER NOT NULL DEFAULT 0"},
 		{"uncertain_checkout", "INTEGER NOT NULL DEFAULT 0"},
 		{"uncertain_time", "TEXT NOT NULL DEFAULT ''"},
+		{"fqn", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := db.addColumnIfMissing("queue", col[0], col[1]); err != nil {
 			return err

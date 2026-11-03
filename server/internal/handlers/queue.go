@@ -35,6 +35,8 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 			// Force 强制入队还没上架的型号;CouponFallback 优惠码被拒时仍按原价自动付款
 			Force          bool `json:"force"`
 			CouponFallback bool `json:"couponFallback"`
+			// FQN 可选:锁定整套硬件组合,只在这条 FQN 有货时下单
+			FQN string `json:"fqn"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "任务参数格式不正确"})
@@ -52,6 +54,11 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 		body.Datacenter = strings.TrimSpace(body.Datacenter)
 		if body.PlanCode == "" || body.Datacenter == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "缺少 planCode 或 datacenter", "code": "E75DA4B08"})
+			return
+		}
+		body.FQN = strings.ToLower(strings.TrimSpace(body.FQN))
+		if body.FQN != "" && !strings.HasPrefix(body.FQN, strings.ToLower(body.PlanCode)+".") {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": fmt.Sprintf("FQN 必须以「%s.」开头（格式 <planCode>.<内存段>.<硬盘段>）", body.PlanCode)})
 			return
 		}
 		// 入队前挡住"这个账户根本买不到这台机器"的任务(跨区 / 非 Eco / planCode 不存在)。
@@ -92,6 +99,7 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 			Force:         body.Force,
 			// 只在自动付款时有意义,不开自动付款的话被拒也只是生成一张未付款订单
 			CouponFallback: body.CouponFallback && body.AutoPay,
+			FQN:            body.FQN,
 		}
 		// 入队 + 落库是一件事:EnqueueItems 失败会把这条从内存撤回,
 		// 不留"这次能跑但重启就丢"的半成功任务
