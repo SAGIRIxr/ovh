@@ -1,0 +1,140 @@
+name: Release
+
+# 每次推送 main 自动发一个新版本，不用手动打标签：
+#   版本号 = 已有最大的 vX.Y.Z 标签的补丁号 +1；VERSION 文件比最大标签还高时用 VERSION。
+#   想升大/小版本（比如 0.5.x → 0.6.0），把 VERSION 改成 0.6.0 推上来即可，之后从它往上加。
+# 产物：
+#   - Release 附件 ovh-server-<os>-<arch> + checksums.txt —— 应用内「一键更新」下载的就是它们，名字不能改
+#   - 镜像 ghcr.io/<仓库>:latest / :X.Y.Z / :X.Y，linux/amd64 + arm64
+#   - 仓库里配了 DOCKERHUB_USERNAME / DOCKERHUB_TOKEN 两个 secret 时，同时推 Docker Hub 的 <用户名>/ovh
+on:
+  push:
+    branches: [main]
+    paths-ignore: ['**.md', 'docs/**']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+# 版本号按顺序递增，排队而不是取消，免得两次推送算出同一个号
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # 要读全部标签来算下一个版本号
+
+      - name: 计算版本号
+        id: ver
+        run: |
+          base=$(tr -d '[:space:]' < VERSION)
+          latest=$(git tag -l 'v[0-9]*.[0-9]*.[0-9]*' | sed 's/^v//' | sort -V | tail -1)
+          if [ -z "$latest" ]; then
+            version=$base
+          elif [ "$base" != "$latest" ] && [ "$(printf '%s\n%s\n' "$latest" "$base" | sort -V | tail -1)" = "$base" ]; then
+            version=$base # VERSION 被手动调高了
+          else
+            IFS=. read -r major minor patch <<< "$latest"
+            version="$major.$minor.$((patch + 1))"
+          fi
+          # Dockerfile 和二进制都从 VERSION 读版本号,这里写回去让三处一致
+          echo "$version" > VERSION
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "minor=${version%.*}" >> "$GITHUB_OUTPUT"
+          echo "版本号: $version" >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建前端
+        working-directory: web
+        run: npm ci && npm run build
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: server/go.mod
+          cache-dependency-path: server/go.sum
+
+      - name: 交叉编译二进制
+        working-directory: server
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -e
+          mkdir -p ../dist
+          build() {
+            out="../dist/ovh-server-$1-$2"
+            [ "$1" = windows ] && out="$out.exe"
+            GOOS="$1" GOARCH="$2" CGO_ENABLED=0 go build -tags ui -trimpath \
+              -ldflags "-s -w -X github.com/ovh-buy/server/internal/handlers.Version=${VERSION}" \
+              -o "$out" .
+          }
+          build linux amd64
+          build linux arm64
+          build windows amd64
+          cd ../dist && sha256sum ovh-server-* > checksums.txt && cat checksums.txt
+
+      - name: 镜像名
+        id: img
+        run: |
+          {
+            echo "names<<EOF"
+            echo "ghcr.io/${GITHUB_REPOSITORY,,}"
+            if [ -n "$DOCKERHUB_USERNAME" ]; then echo "$DOCKERHUB_USERNAME/ovh"; fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/login-action@v3
+        if: env.DOCKERHUB_USERNAME != ''
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.img.outputs.names }}
+          tags: |
+            type=raw,value=latest
+            type=raw,value=${{ steps.ver.outputs.version }}
+            type=raw,value=${{ steps.ver.outputs.minor }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # 放在最后：构建失败就不会留下没有产物的版本号
+      - name: 打标签并发 Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          gh release create "v$VERSION" dist/* --target "$GITHUB_SHA" --title "v$VERSION" --latest \
+            --notes "docker pull ghcr.io/${GITHUB_REPOSITORY,,}:$VERSION" --generate-notes
