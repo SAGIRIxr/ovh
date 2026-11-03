@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -134,9 +135,17 @@ func CreatePairingCode(state *app.State) gin.HandlerFunc {
 }
 
 // pairURL 生成 App 可识别的配对 URL(ovhconsole://pair?host=...&code=...)
+//
+// 协议判断:直连 TLS,或者反代(终止 TLS 后回源 http)带了 X-Forwarded-Proto: https。
+// 这个头可以伪造,但伪造的结果只是让二维码变成 https,不会降级;而不认它的话,
+// 「HTTPS 反代 → 后端 HTTP」这种最常见的部署生成的永远是 http 地址,App 会明文兑换配对码。
+// 设了 PUBLIC_BASE_URL(如 https://panel.example.com)就直接用它。
 func pairURL(c *gin.Context, code string) string {
+	if base := strings.TrimRight(strings.TrimSpace(os.Getenv("PUBLIC_BASE_URL")), "/"); base != "" {
+		return base + "/api/app/pair#" + code
+	}
 	scheme := "https"
-	if c.Request.TLS == nil {
+	if c.Request.TLS == nil && !strings.EqualFold(strings.TrimSpace(strings.Split(c.GetHeader("X-Forwarded-Proto"), ",")[0]), "https") {
 		// 本地 http 部署(127.0.0.1:19998)也要能配对;App 侧对私有地址允许明文
 		scheme = "http"
 	}
@@ -168,9 +177,14 @@ func RedeemPairingCode(state *app.State) gin.HandlerFunc {
 			Code       string `json:"code"`
 			DeviceName string `json:"deviceName"`
 		}
+		// 免鉴权接口:请求体封顶 4 KiB(码 + 60 字设备名绰绰有余),不让人塞几 MB 进来解析
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4<<10)
 		_ = c.ShouldBindJSON(&body)
 		code := strings.ToUpper(strings.TrimSpace(body.Code))
 		if code == "" {
+			// 空码 / 畸形 JSON 也算一次失败,否则可以无限次白打这个接口
+			pairFailureLimiter.fail(ip)
+			pairGlobalLimiter.fail()
 			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "缺少配对码", "code": "E6641AC88"})
 			return
 		}

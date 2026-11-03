@@ -126,7 +126,9 @@ func TestWhitelistUnaffected(t *testing.T) {
 
 // 查看凭据的二次确认不能变成一个不限次的密钥猜测口:
 // 猜错计数、超限锁定,而且与登录用的是同一把闸。
-func TestVerifyKeyAgainSharesLimiter(t *testing.T) {
+// 二次验证有自己的计数:中间件每次认证成功都会清零登录失败数,
+// 拿着有效设备令牌的人不能借此无限次猜主密钥
+func TestVerifyKeyAgainHasOwnLimiter(t *testing.T) {
 	ResetAuthFailures()
 	now := time.Now()
 	if ok, _ := VerifyKeyAgain("10.0.0.9", "correct-key", "correct-key", now); !ok {
@@ -136,14 +138,20 @@ func TestVerifyKeyAgainSharesLimiter(t *testing.T) {
 		t.Fatal("服务端没有密钥时不能放行空串")
 	}
 	for i := 0; i < MaxAuthFailures; i++ {
+		// 模拟每次请求都先被中间件用设备令牌认证成功、清零登录计数
+		clearAuthFailures("10.0.0.9")
 		VerifyKeyAgain("10.0.0.9", "wrong", "correct-key", now)
 	}
+	clearAuthFailures("10.0.0.9")
 	ok, wait := VerifyKeyAgain("10.0.0.9", "correct-key", "correct-key", now)
 	if ok || wait <= 0 {
 		t.Fatalf("超限后即使密钥正确也应被锁定,得 ok=%v wait=%v", ok, wait)
 	}
-	if blocked, _ := authBlocked("10.0.0.9", now); !blocked {
-		t.Fatal("二次确认的失败应计入登录同一把闸")
+	if blocked, _ := authBlocked("10.0.0.9", now); blocked {
+		t.Fatal("二次验证猜错不该把这个 IP 的正常 API 访问一起锁掉")
+	}
+	if ok, _ := VerifyKeyAgain("10.0.0.9", "correct-key", "correct-key", now.Add(AuthFailureWindow)); !ok {
+		t.Fatal("冷却结束后应恢复")
 	}
 	ResetAuthFailures()
 }

@@ -104,14 +104,19 @@ func ResetAuthFailures() {
 // 所以这里要的是"此刻坐在屏幕前的人知道密钥"。
 // 猜错同样计入按 IP 的爆破闸 —— 不能让这个接口变成一个不限次的密钥猜测口。
 // 返回值 blockedFor > 0 表示该来源已被暂时锁定。
+//
+// 计数和登录鉴权分开记(键加 reverify| 前缀):中间件每次认证成功都会清零该 IP 的登录失败数,
+// 共用一个桶的话,拿着有效设备令牌的人每猜一次密钥前都被清零一次,限流永远到不了阈值。
+// 二次验证的桶只在二次验证成功时清零。
 func VerifyKeyAgain(ip, provided, want string, now time.Time) (ok bool, blockedFor time.Duration) {
-	if blocked, wait := authBlocked(ip, now); blocked {
+	bucket := "reverify|" + ip
+	if blocked, wait := authBlocked(bucket, now); blocked {
 		return false, wait
 	}
 	if want == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(want)) != 1 {
-		recordAuthFailure(ip, now)
+		recordAuthFailure(bucket, now)
 		return false, 0
 	}
-	clearAuthFailures(ip)
+	clearAuthFailures(bucket)
 	return true, 0
 }

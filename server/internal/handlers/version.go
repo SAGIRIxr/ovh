@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -84,8 +85,25 @@ func semverGreater(latest, current string) bool {
 // 后端不缓存、不定时跑、不存任何状态,纯粹被动响应:每次访问触发一次拉取。
 // 频率控制全交给前端 React Query 的 staleTime(同一会话 1h 内不重复请求)。
 // dev 版本(未注入 ldflags)也返回 latest 信息,但 hasUpdate 始终 false,避免开发时刷屏。
+// 更新检查是免鉴权接口,每次请求都打一次 GitHub 的话,谁都能拿它刷出口流量、
+// 把 GitHub 的匿名限额(60 次/小时)耗光。成功结果缓存 5 分钟;并发请求排队,
+// 只有第一个真的出去拉
+var (
+	releaseCacheMu  sync.Mutex
+	releaseCache    *githubRelease
+	releaseCachedAt time.Time
+)
+
+const releaseCacheTTL = 5 * time.Minute
+
 func CheckUpdate(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		releaseCacheMu.Lock()
+		defer releaseCacheMu.Unlock()
+		if releaseCache != nil && time.Since(releaseCachedAt) < releaseCacheTTL {
+			respondRelease(c, *releaseCache, releaseCachedAt)
+			return
+		}
 		// 与真正执行更新的 updater 用同一个来源:否则设了 OVH_UPDATE_API(私有镜像)之后,
 		// 这里显示"有 v1.2.3",更新器却去 GitHub 抓另一个版本,用户看到的和装上的对不上
 		url := updater.LatestReleaseURL()
@@ -122,26 +140,31 @@ func CheckUpdate(state *app.State) gin.HandlerFunc {
 			return
 		}
 
-		latest := strings.TrimPrefix(rel.TagName, "v")
-		hasUpdate := Version != "dev" && semverGreater(latest, Version)
-
-		c.JSON(http.StatusOK, gin.H{
-			"current":     Version,
-			"latest":      latest,
-			"tag":         rel.TagName,
-			"name":        rel.Name,
-			"hasUpdate":   hasUpdate,
-			"url":         rel.HTMLURL,
-			"publishedAt": rel.PublishedAt,
-			"body":        rel.Body,
-			"prerelease":  rel.Prerelease,
-			"checkedAt":   time.Now().UTC().Format(time.RFC3339),
-			// 容器里自更新是停用的 —— 界面据此把"立即更新"换成"怎么拉新镜像",
-			// 而不是给一个点了必然失败的按钮。
-			"inContainer": updater.InContainer(),
-			"updateHint":  containerHintIfNeeded(),
-		})
+		releaseCache, releaseCachedAt = &rel, time.Now()
+		respondRelease(c, rel, releaseCachedAt)
 	}
+}
+
+func respondRelease(c *gin.Context, rel githubRelease, checkedAt time.Time) {
+	latest := strings.TrimPrefix(rel.TagName, "v")
+	hasUpdate := Version != "dev" && semverGreater(latest, Version)
+
+	c.JSON(http.StatusOK, gin.H{
+		"current":     Version,
+		"latest":      latest,
+		"tag":         rel.TagName,
+		"name":        rel.Name,
+		"hasUpdate":   hasUpdate,
+		"url":         rel.HTMLURL,
+		"publishedAt": rel.PublishedAt,
+		"body":        rel.Body,
+		"prerelease":  rel.Prerelease,
+		"checkedAt":   checkedAt.UTC().Format(time.RFC3339),
+		// 容器里自更新是停用的 —— 界面据此把"立即更新"换成"怎么拉新镜像",
+		// 而不是给一个点了必然失败的按钮。
+		"inContainer": updater.InContainer(),
+		"updateHint":  containerHintIfNeeded(),
+	})
 }
 
 // containerHintIfNeeded 容器里返回更新指引,否则空串。

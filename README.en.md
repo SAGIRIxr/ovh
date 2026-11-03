@@ -521,7 +521,7 @@ Inside: after ~3–5 minutes the root password arrives at the email you set (emp
 
 Since v0.1.32, 10 consecutive wrong keys from one source triggers a 5-minute refusal — this blocks brute force (this service can order servers with your OVH account; with no friction, anyone who can reach the port gets thousands of guesses per second).
 
-The key is `API_SECRET_KEY` in the backend `.env`; the default is `123456` if never set (strongly recommended to change; the startup log warns in red). Wait out the cooldown and enter the correct one — **a correct entry resets the counter immediately**. Rate limits are per source IP; someone else's mistakes won't lock you out.
+The key is `API_SECRET_KEY` in the backend `.env`. If it was never set, v0.5.7+ generates a random key on first start, writes it to the same `.env` and prints it in the startup log (it used to fall back to the public `123456`). An explicit `123456` still works but only listens on 127.0.0.1; set a random key and restart to reach it from other machines. Wait out the cooldown and enter the correct one — **a correct entry resets the counter immediately**. Rate limits are per source IP; someone else's mistakes won't lock you out.
 
 ### Logs seem to be missing a chunk when stopping / restarting the container
 

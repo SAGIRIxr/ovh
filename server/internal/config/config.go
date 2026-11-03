@@ -27,6 +27,8 @@ func encryptConfig(c types.Config) types.Config {
 	c.ConsumerKey = secret.Encrypt(c.ConsumerKey)
 	c.AppKey = secret.Encrypt(c.AppKey)
 	c.TgToken = secret.Encrypt(c.TgToken)
+	// webhook 地址常把 token 放在路径或查询串里,和 Telegram Token 一个级别
+	c.NotifyWebhookURL = secret.Encrypt(c.NotifyWebhookURL)
 	return c
 }
 

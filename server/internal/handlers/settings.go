@@ -14,10 +14,29 @@ import (
 )
 
 // GetSettings GET /api/settings
+//
+// 敏感字段只下发掩码。以前整份配置原样返回,Telegram Token、Webhook 地址(常带 token)
+// 和老版本残留的 OVH 凭据都是明文 —— 任何一个设备令牌都能取走,
+// 绕过了「查看完整凭据要再输一次密钥」那道门。保存时收到原样的掩码就保留旧值。
 func GetSettings(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		c.JSON(http.StatusOK, state.Config.Get())
+		cfg := state.Config.Get()
+		cfg.AppKey = maskCred(cfg.AppKey)
+		cfg.AppSecret = maskCred(cfg.AppSecret)
+		cfg.ConsumerKey = maskCred(cfg.ConsumerKey)
+		cfg.TgToken = maskCred(cfg.TgToken)
+		cfg.NotifyWebhookURL = maskCred(cfg.NotifyWebhookURL)
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, cfg)
 	}
+}
+
+// keepIfMasked 前端把掩码原样提交回来 = 没改这个字段,沿用旧值
+func keepIfMasked(next, prev string) string {
+	if prev != "" && next == maskCred(prev) {
+		return prev
+	}
+	return next
 }
 
 // SaveSettings POST /api/settings
@@ -30,6 +49,11 @@ func SaveSettings(state *app.State) gin.HandlerFunc {
 		}
 
 		prev := state.Config.Get()
+		newCfg.AppKey = keepIfMasked(newCfg.AppKey, prev.AppKey)
+		newCfg.AppSecret = keepIfMasked(newCfg.AppSecret, prev.AppSecret)
+		newCfg.ConsumerKey = keepIfMasked(newCfg.ConsumerKey, prev.ConsumerKey)
+		newCfg.TgToken = keepIfMasked(newCfg.TgToken, prev.TgToken)
+		newCfg.NotifyWebhookURL = keepIfMasked(newCfg.NotifyWebhookURL, prev.NotifyWebhookURL)
 
 		// 凭据去空白（前端粘贴时常带空格/换行，会导致 OVH 签名失败 "Invalid signature"）
 		newCfg.AppKey = strings.TrimSpace(newCfg.AppKey)

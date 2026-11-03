@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"io/fs"
@@ -121,12 +123,21 @@ func main() {
 	lg := logger.New(paths.LogFile("app.log.json"), console)
 	cfgStore := config.New(sqliteDB)
 	state := app.NewState(paths, cfgStore, lg, sqliteDB)
-	state.APIKey = os.Getenv("API_SECRET_KEY")
-	usingDefaultAPIKey := false
+	// 访问密钥。以前没设就退回公开的 123456,配上默认监听所有网卡,
+	// 装完就是一台谁都能操作 OVH 账户的机器。现在:
+	//   - 没设 → 生成一把高熵随机密钥写进 .env(和数据库密钥同一个文件),启动日志里打出来;
+	//   - 设成了公开默认值 123456(照抄 .env.example 的人) → 照常能用,但下面会强制只监听本机。
+	state.APIKey = strings.TrimSpace(os.Getenv("API_SECRET_KEY"))
+	generatedAPIKey := false
 	if state.APIKey == "" {
-		state.APIKey = "123456"
-		usingDefaultAPIKey = true
+		state.APIKey = randomHex(24)
+		generatedAPIKey = true
+		if err := secret.AppendEnv(envPath, "面板访问密钥(首次启动自动生成)。登录网页时填它;想换就改这一行再重启", "API_SECRET_KEY", state.APIKey); err != nil {
+			// 存不下来也照样用这把,只是重启后会换新的 —— 每次都会打在日志里
+			console.Warn("访问密钥没能写进配置文件,重启后会重新生成", "file", envPath, "err", err)
+		}
 	}
+	usingDefaultAPIKey := state.APIKey == defaultAPIKey
 	state.Port = os.Getenv("PORT")
 	if state.Port == "" {
 		state.Port = "19998"
@@ -633,6 +644,12 @@ func main() {
 	// Windows 上 localhost 常先解析到 ::1，单绑 127.0.0.1 会被浏览器拒连。
 	// 如果只想锁本机回环，设 LISTEN_HOST=127.0.0.1
 	host := os.Getenv("LISTEN_HOST")
+	// 公开默认密钥不许对外:端口可达的人不用猜就能登录。降级成只监听本机,
+	// 要对外就先换密钥。容器里这意味着从宿主机连不上 —— 日志会说清楚原因
+	if enableAuth && usingDefaultAPIKey && !isLoopbackHost(host) {
+		console.Error("⚠️  API_SECRET_KEY 是公开的默认值 123456,已强制只监听 127.0.0.1。设置一个随机密钥后重启才能从其它机器访问")
+		host = "127.0.0.1"
+	}
 	addr := host + ":" + state.Port
 	// 安全告警必须在监听之前、而且要显眼。
 	// 数据库密钥那套(密文对不上直接拒绝启动)的标准,鉴权这边一直没有:
@@ -642,11 +659,12 @@ func main() {
 		console.Error("⚠️  API 密钥校验已关闭(ENABLE_API_KEY_AUTH=false):任何人都能调用全部接口,包括下单和重装。仅限本地调试")
 	} else if usingDefaultAPIKey {
 		console.Error("⚠️  正在使用默认 API 密钥 123456 —— 请立刻在 .env 里设置 API_SECRET_KEY")
-		if host == "" {
-			console.Error("⚠️  并且监听所有网卡(LISTEN_HOST 为空):同网段任何人都能用默认密钥操作你的 OVH 账户")
-		}
+	} else if generatedAPIKey {
+		console.Warn("已生成面板访问密钥(登录网页时填它): "+state.APIKey, "file", envPath)
 	}
-	srv := &http.Server{Addr: addr, Handler: r}
+	// 慢连接防护:只给读请求头和空闲连接设上限。不设 ReadTimeout / WriteTimeout ——
+	// 自更新上传、日志拉取这类长请求会被一刀切断
+	srv := &http.Server{Addr: addr, Handler: r, ReadHeaderTimeout: 15 * time.Second, IdleTimeout: 2 * time.Minute}
 
 	// 端口真正 Listen 成功之后才标记"这一版能跑" —— 此时数据库已打开、路由已注册、
 	// 端口也占上了。太早标记等于没验证:启动就 panic、端口被占、数据库损坏,
@@ -915,6 +933,27 @@ func availabilityHandler(h gin.HandlerFunc) gin.HandlerFunc {
 // envFilePath 配置文件的位置。
 // 默认是工作目录下的 .env（godotenv 的默认行为），允许用 OVH_ENV_FILE 覆盖 ——
 // systemd / docker 里工作目录未必是程序所在目录，把路径写死会让密钥"下次启动就找不到"。
+// defaultAPIKey .env.example 里写的、所有人都知道的那个值
+const defaultAPIKey = "123456"
+
+func randomHex(n int) string {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand 不可用: " + err.Error())
+	}
+	return hex.EncodeToString(b)
+}
+
+// isLoopbackHost LISTEN_HOST 是不是只绑本机。空串 = 所有网卡,不算
+func isLoopbackHost(h string) bool {
+	h = strings.Trim(strings.TrimSpace(h), "[]")
+	if strings.EqualFold(h, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	return ip != nil && ip.IsLoopback()
+}
+
 func envFilePath() string {
 	if p := strings.TrimSpace(os.Getenv("OVH_ENV_FILE")); p != "" {
 		return p

@@ -223,6 +223,9 @@ function QueuePage() {
   const filteredItems = applyQueueFilters(items, effectiveFilters, accountsQ.data);
   const visibleItems = filteredItems.filter((item) => filter === "all" || item.status === filter || (filter === "running" && item.status === "pending"));
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  const groups = groupItems(visibleItems, effectiveFilters.groupBy, accountsQ.data);
+  // 折叠起来的组看不见,全选和批量操作都不能碰它们 —— 否则「全选 → 删除」会删掉看不见的任务
+  const shownItems = groups.filter((g) => !g.key || !collapsed.has(g.key)).flatMap((g) => g.items);
   // 「复制任务」:单条走新建对话框(可改),多条走批量复制对话框
   const [copyItem, setCopyItem] = useState<QueueItem | null>(null);
   const [showBatchCopy, setShowBatchCopy] = useState(false);
@@ -245,11 +248,11 @@ function QueuePage() {
   useEffect(() => {
     setSelected((prev) => {
       if (prev.size === 0) return prev;
-      const alive = new Set(visibleItems.map((i) => i.id));
+      const alive = new Set(shownItems.map((i) => i.id));
       const next = new Set([...prev].filter((id) => alive.has(id)));
       return next.size === prev.size ? prev : next;
     });
-  }, [items, filter, filters]);
+  }, [items, filter, filters, collapsed]);
 
   const selectedItems = items.filter((i) => selected.has(i.id));
   const toggleSelect = (id: string) =>
@@ -258,7 +261,7 @@ function QueuePage() {
       next.has(id) ? next.delete(id) : next.add(id);
       return next;
     });
-  const allSelected = visibleItems.length > 0 && visibleItems.every((item) => selected.has(item.id));
+  const allSelected = shownItems.length > 0 && shownItems.every((item) => selected.has(item.id));
 
   /** 逐条执行并汇总成一条结果,不要弹 N 个 toast。label 传已翻译的动词 */
   const runBatch = async (
@@ -368,7 +371,7 @@ function QueuePage() {
               </div>
             </div>
           )}
-          {groupItems(visibleItems, effectiveFilters.groupBy, accountsQ.data).map((g) => {
+          {groups.map((g) => {
             const open = !collapsed.has(g.key);
             const groupSelected = g.items.every((i) => selected.has(i.id));
             return (
@@ -462,8 +465,8 @@ function QueuePage() {
             </Button>
             <Button
               variant="outline"
-              onClick={() => setSelected(allSelected ? new Set() : new Set(visibleItems.map((i) => i.id)))}
-              disabled={visibleItems.length === 0}
+              onClick={() => setSelected(allSelected ? new Set() : new Set(shownItems.map((i) => i.id)))}
+              disabled={shownItems.length === 0}
             >
               {allSelected ? t("queue.unselectAll") : t("queue.selectAll")}
             </Button>

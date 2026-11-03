@@ -177,12 +177,19 @@ func resolveKey(dataDir, envPath string) ([]byte, error) {
 // 只追加不重写:这个文件是用户自己在维护的(端口、API 密钥、监听地址都在里面),
 // 解析后重新序列化会丢掉注释和排版,是拿别人的配置文件冒险。
 func appendEnvKey(envPath, encodedKey string) error {
+	return AppendEnv(envPath,
+		"数据库加密密钥(自动生成)。加密的是 OVH API 凭据和 Telegram Token。\n"+
+			"# 丢了这一行,已保存的账户就再也解不开了,只能重新录入 —— 备份配置文件时别漏了它。",
+		KeyEnv, encodedKey)
+}
+
+// AppendEnv 往 .env 末尾追加一行 KEY=value(带注释),文件权限收紧到 0600。
+// 只追加不重写,理由见 appendEnvKey。
+func AppendEnv(envPath, comment, key, value string) error {
 	if strings.TrimSpace(envPath) == "" {
 		return errors.New("没有配置文件路径")
 	}
-	line := "\n# 数据库加密密钥(自动生成)。加密的是 OVH API 凭据和 Telegram Token。\n" +
-		"# 丢了这一行,已保存的账户就再也解不开了,只能重新录入 —— 备份配置文件时别漏了它。\n" +
-		KeyEnv + "=" + encodedKey + "\n"
+	line := "\n# " + comment + "\n" + key + "=" + value + "\n"
 
 	// O_RDWR 而不是 O_WRONLY:下面要把最后一个字节读回来判断有没有换行,
 	// 只写的 fd 读不了(而且失败是静默的,那段检查会白写)
