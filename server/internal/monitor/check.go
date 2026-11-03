@@ -459,13 +459,6 @@ func (m *Monitor) CheckAvailabilityChange(sub *Subscription, traceID string) {
 		priceCfg := copyMap(configInfo)
 		priceCfg["account_id"] = choice.accountID
 
-		type dcStatus struct {
-			status    string
-			statusKey string
-			oldStatus string
-			hasOld    bool
-			orderable bool
-		}
 		dcStatusMap := map[string]dcStatus{}
 		priceCheckTasks := []string{}
 		for dc, status := range configData.Datacenters {
@@ -481,6 +474,27 @@ func (m *Monitor) CheckAvailabilityChange(sub *Subscription, traceID string) {
 			dcStatusMap[dc] = dcStatus{status: status, statusKey: statusKey, oldStatus: old, hasOld: hasOld, orderable: orderable}
 			if orderable {
 				priceCheckTasks = append(priceCheckTasks, dc)
+			}
+		}
+
+		// 无货 → 有货的那一刻先入队,不等价格校验。
+		//
+		// 价格校验是一整轮购物车往返(建车 / 加商品 / 配置 / 询价),冷启动要好几秒,
+		// 而补货窗口常常以百毫秒计。它本来就不是下单的闸门:抢购任务自己会重查库存、
+		// 重新建车,配不出来的配置在那边照样 fail-fast;价格校验只为通知里那句价格。
+		// 以前它挡在入队前面,校验失败(429 / 超时 / 目录还没上架)就整轮不下单。
+		earlyOrdered := map[string]bool{}
+		if cfg.AutoOrder {
+			early := selectEarlyOrderDCs(dcStatusMap)
+			if len(early) > 0 {
+				targets := make([]notification, 0, len(early))
+				for _, dc := range early {
+					targets = append(targets, notification{dc: dc})
+					earlyOrdered[dc] = true
+				}
+				m.state.Logger.Info(fmt.Sprintf("%s [%s] 补货机房 %v,不等价格校验直接入队 [config-trace:%s]",
+					planCode, configDisplay, early, configTraceID), "monitor")
+				m.autoOrder(sub, cfg, choice, planCode, configInfo, targets)
 			}
 		}
 
@@ -666,31 +680,17 @@ func (m *Monitor) CheckAvailabilityChange(sub *Subscription, traceID string) {
 		// unavailable → price_check_failed(抖一下) → available 这条路上,
 		// 最后那步跳变会被过滤掉 —— 通知发了「🎉 上架」,一单没下,
 		// 而且此后 lastStatus 停在 available 再无跳变,整个补货窗口都不下单。
+		//
+		// 上面已经提前入队的机房这里跳过,剩下的主要是 price_check_failed → available
+		// (上一轮校验失败、这一轮才通过)这条路径。
 		orderTargets := []notification{}
-		for _, n := range notifications {
-			if n.changeType != "available" || n.priceCheckFailed {
-				continue
-			}
-			if !n.hasOld || n.oldStatus == "unavailable" || n.oldStatus == "price_check_failed" {
+		for _, n := range selectOrderTargets(notifications) {
+			if !earlyOrdered[n.dc] {
 				orderTargets = append(orderTargets, n)
 			}
 		}
-		// 触发条件:订阅勾了 AutoOrder + 指定了某个账户。
-		// 没账户(AutoOrderAccountID="") → 只发可用通知,不下单(用户明确决定)。
 		if len(orderTargets) > 0 && cfg.AutoOrder {
-			switch {
-			case cfg.AutoOrderAccountID == "":
-				m.state.Logger.Info(fmt.Sprintf("[monitor] %s 触发 auto_order 但未指定账户,只通知不下单", planCode), "monitor")
-			case choice.accountID != cfg.AutoOrderAccountID:
-				// 查询/验价账户与下单账户不是同一个 —— 只可能发生在下单账户已被删除、
-				// 本轮退回默认账户查询的时候。这种单子照发出去,买到的会是"另一个账户看到的价格
-				// 和可售性",甚至直接被 quick-order 以账户不存在拒掉。宁可不下单,只通知。
-				m.state.Logger.Warn(fmt.Sprintf(
-					"[monitor] %s 跳过自动下单:验价用的是账户 %q,而订阅指定的下单账户是 %q,两者不一致(下单账户可能已被删除)",
-					planCode, choice.accountID, cfg.AutoOrderAccountID), "monitor")
-			default:
-				m.batchOrder(planCode, configInfo, orderTargets, cfg.Quantity, cfg.AutoOrderAccountID, cfg.AutoPay, func() bool { return m.checkCurrent(sub, cfg) })
-			}
+			m.autoOrder(sub, cfg, choice, planCode, configInfo, orderTargets)
 		}
 
 		// 价格查询（同一配置只查一次）
@@ -938,6 +938,65 @@ func (m *Monitor) calcDuration(sub *Subscription, dc, configDisplay string, targ
 		return fmt.Sprintf("历时 %d分%d秒", minutes, seconds)
 	}
 	return fmt.Sprintf("历时 %d秒", seconds)
+}
+
+// dcStatus 一个机房在本轮检查里的原始库存状态,以及上一轮落库的规范化状态。
+type dcStatus struct {
+	status    string
+	statusKey string
+	oldStatus string
+	hasOld    bool
+	orderable bool
+}
+
+// selectEarlyOrderDCs 挑出「无货 → 可下单」(或首次检查就可下单)的机房,
+// 这些机房不等价格校验直接入队。
+//
+// 上一轮是 price_check_failed 的不算:库存一直在、只是校验一直不过,
+// 如果每轮都算跳变,任务失败后每 5 秒就会再入队一次。这条路径留给
+// 校验通过后的 selectOrderTargets。
+func selectEarlyOrderDCs(statuses map[string]dcStatus) []string {
+	dcs := []string{}
+	for dc, ds := range statuses {
+		if ds.orderable && (!ds.hasOld || ds.oldStatus == "unavailable") {
+			dcs = append(dcs, dc)
+		}
+	}
+	sort.Strings(dcs)
+	return dcs
+}
+
+// selectOrderTargets 价格校验之后的下单判据:本轮跳成 available,且上一轮不是 available。
+func selectOrderTargets(ns []notification) []notification {
+	out := []notification{}
+	for _, n := range ns {
+		if n.changeType != "available" || n.priceCheckFailed {
+			continue
+		}
+		if !n.hasOld || n.oldStatus == "unavailable" || n.oldStatus == "price_check_failed" {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// autoOrder 订阅勾了 AutoOrder 时把目标机房送进抢购队列。
+// 没指定账户(AutoOrderAccountID="") → 只发可用通知,不下单(用户明确决定)。
+func (m *Monitor) autoOrder(sub *Subscription, cfg subCheckConfig, choice queryAccountChoice, planCode string,
+	configInfo map[string]interface{}, targets []notification) {
+	switch {
+	case cfg.AutoOrderAccountID == "":
+		m.state.Logger.Info(fmt.Sprintf("[monitor] %s 触发 auto_order 但未指定账户,只通知不下单", planCode), "monitor")
+	case choice.accountID != cfg.AutoOrderAccountID:
+		// 查询/验价账户与下单账户不是同一个 —— 只可能发生在下单账户已被删除、
+		// 本轮退回默认账户查询的时候。这种单子照发出去,买到的会是"另一个账户看到的价格
+		// 和可售性",甚至直接被 quick-order 以账户不存在拒掉。宁可不下单,只通知。
+		m.state.Logger.Warn(fmt.Sprintf(
+			"[monitor] %s 跳过自动下单:验价用的是账户 %q,而订阅指定的下单账户是 %q,两者不一致(下单账户可能已被删除)",
+			planCode, choice.accountID, cfg.AutoOrderAccountID), "monitor")
+	default:
+		m.batchOrder(planCode, configInfo, targets, cfg.Quantity, cfg.AutoOrderAccountID, cfg.AutoPay, func() bool { return m.checkCurrent(sub, cfg) })
+	}
 }
 
 // configMatchesFilter 判断一套配置是否落在订阅指定的配置范围内。
