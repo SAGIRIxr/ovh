@@ -54,6 +54,8 @@ func SaveSettings(state *app.State) gin.HandlerFunc {
 		newCfg.ConsumerKey = keepIfMasked(newCfg.ConsumerKey, prev.ConsumerKey)
 		newCfg.TgToken = keepIfMasked(newCfg.TgToken, prev.TgToken)
 		newCfg.NotifyWebhookURL = keepIfMasked(newCfg.NotifyWebhookURL, prev.NotifyWebhookURL)
+		// 访问密钥登录开关有专门的接口(带防锁死检查),这里不许顺手改掉
+		newCfg.DisableKeyLogin = prev.DisableKeyLogin
 
 		// 凭据去空白（前端粘贴时常带空格/换行，会导致 OVH 签名失败 "Invalid signature"）
 		newCfg.AppKey = strings.TrimSpace(newCfg.AppKey)

@@ -120,6 +120,9 @@ type State struct {
 	DB          *db.DB // SQLite 持久化层
 
 	APIKey string
+	// InternalToken 进程内自调用(监控询价打本机 /api/internal/*)用的令牌,启动时随机生成、只在内存里。
+	// 不再拿访问密钥自调用:关掉访问密钥登录之后,内部调用不能跟着失效
+	InternalToken string
 	Port   string
 
 	// 多账户:内存里持有全部 OVH 账户副本(启动从 SQLite 加载),

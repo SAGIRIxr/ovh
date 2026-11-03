@@ -57,11 +57,15 @@ const (
 // 整个面板只有一个管理员身份。user handle 固定,登录时据此确认是本面板签出的通行证
 var passkeyUserHandle = []byte("ovh-console-admin")
 
-type passkeyUser struct{ creds []webauthn.Credential }
+// rpID 只用于显示:用户名写成 admin@域名,Bitwarden 之类的密码管理器里一眼能认出是哪个面板
+type passkeyUser struct {
+	rpID  string
+	creds []webauthn.Credential
+}
 
 func (u passkeyUser) WebAuthnID() []byte                         { return passkeyUserHandle }
-func (u passkeyUser) WebAuthnName() string                       { return "admin" }
-func (u passkeyUser) WebAuthnDisplayName() string                { return "OVH 控制台" }
+func (u passkeyUser) WebAuthnName() string                       { return "admin@" + u.rpID }
+func (u passkeyUser) WebAuthnDisplayName() string                { return "OVH 控制台 (" + u.rpID + ")" }
 func (u passkeyUser) WebAuthnCredentials() []webauthn.Credential { return u.creds }
 
 type passkeyFlow struct {
@@ -174,7 +178,7 @@ func activePasskeyUser(state *app.State, rpID string) (passkeyUser, map[string]d
 	if err != nil {
 		return passkeyUser{}, nil, err
 	}
-	u := passkeyUser{}
+	u := passkeyUser{rpID: rpID}
 	byID := map[string]db.Passkey{}
 	for _, p := range rows {
 		var cred webauthn.Credential

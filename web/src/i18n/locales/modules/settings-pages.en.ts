@@ -61,6 +61,16 @@ const pack: SettingsPagesPack = {
       loggedInViaPasskey: "Signed in with a passkey (expires after 30 days)",
       loggedInViaKey: "Signed in with the access key",
       logout: "Log out",
+      disableKeyLogin: "Disable access-key sign-in",
+      disableNeedsPasskey: "Log out and sign in with a passkey once before turning this on, to confirm passkeys work on this domain and avoid locking yourself out.",
+      disableHint: "When on, the web UI only accepts passkeys; the access key is only used for re-confirmation (adding passkeys, revealing credentials). App devices and Telegram are unaffected. If no passkey works: create {{path}} on the server (with Docker that is ./data/allow-key-login next to the compose file; any content) and access-key sign-in is restored immediately without a restart. Delete it afterwards.",
+      disableConfirm: "Disable access-key sign-in? Only passkeys will work afterwards.
+
+Emergency recovery: create {{path}} on the server",
+      emergencyActive: "The emergency file {{path}} still exists, so access-key sign-in is temporarily restored. Delete it when done.",
+      keyLoginOff: "Access-key sign-in disabled",
+      keyLoginOn: "Access-key sign-in restored",
+      keyLoginFailed: "Failed to change",
     },
     purchase: {
       title: "Sniping parameters",

@@ -27,6 +27,10 @@ type Config struct {
 	// 单独一个值是因为场景不同:货刚出现那一刻要抢,窗口可能只有几十秒,
 	// 所以默认比普通任务激进得多;但太密会吃 OVH 的 429,这里交给用户自己权衡。
 	QuickOrderRetryInterval int `json:"quickOrderRetryInterval,omitempty"`
+	// DisableKeyLogin 关闭访问密钥登录(只能用通行证 / App 设备令牌进来)。
+	// 只能经 /api/auth/key-login 改(有防锁死检查),普通的保存设置会原样保留它。
+	// 应急:数据目录里放一个 allow-key-login 文件即可临时恢复,见 handlers.KeyLoginDisabled
+	DisableKeyLogin bool `json:"disableKeyLogin,omitempty"`
 }
 
 // 重试间隔的默认值与合法区间(秒)。

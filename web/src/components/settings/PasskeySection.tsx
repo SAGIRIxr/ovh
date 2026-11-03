@@ -14,6 +14,7 @@ import { fmtDateTime } from "@/i18n/format";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Chip } from "@/components/common/Chip";
+import { Switch } from "@/components/ui/switch";
 
 interface PasskeyRow {
   id: number;
@@ -35,6 +36,19 @@ export function PasskeySection() {
     queryKey: QK,
     queryFn: async () =>
       (await api.get<{ passkeys: PasskeyRow[]; domainOk: boolean; domainError?: string }>("/auth/passkeys")).data,
+  });
+  const keyLogin = useQuery({
+    queryKey: ["auth", "key-login"],
+    queryFn: async () =>
+      (await api.get<{ disabled: boolean; emergencyFile: boolean; emergencyPath: string; viaPasskey: boolean }>("/auth/key-login")).data,
+  });
+  const setKeyLogin = useMutation({
+    mutationFn: async (disabled: boolean) => api.post("/auth/key-login", { disabled }),
+    onSuccess: (_r, disabled) => {
+      toast.success(t(disabled ? "settings.passkey.keyLoginOff" : "settings.passkey.keyLoginOn"));
+      qc.invalidateQueries({ queryKey: ["auth", "key-login"] });
+    },
+    onError: (e) => toast.error(apiMessage(e) || t("settings.passkey.keyLoginFailed")),
   });
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
@@ -157,6 +171,30 @@ export function PasskeySection() {
           <p className="text-[12px] text-muted-foreground">{t("settings.passkey.empty")}</p>
         )}
       </div>
+
+      {keyLogin.data && (
+        <div className="rounded-xl border border-border p-3 space-y-1.5">
+          <label className="flex items-center justify-between gap-3 cursor-pointer">
+            <span className="text-[13px] font-medium">{t("settings.passkey.disableKeyLogin")}</span>
+            <Switch
+              checked={keyLogin.data.disabled}
+              disabled={setKeyLogin.isPending || (!keyLogin.data.disabled && !keyLogin.data.viaPasskey)}
+              onCheckedChange={(v) => {
+                if (v && !window.confirm(t("settings.passkey.disableConfirm", { path: keyLogin.data!.emergencyPath }))) return;
+                setKeyLogin.mutate(v);
+              }}
+            />
+          </label>
+          <p className="text-[11px] text-muted-foreground leading-relaxed">
+            {!keyLogin.data.disabled && !keyLogin.data.viaPasskey
+              ? t("settings.passkey.disableNeedsPasskey")
+              : t("settings.passkey.disableHint", { path: keyLogin.data.emergencyPath })}
+          </p>
+          {keyLogin.data.disabled && keyLogin.data.emergencyFile && (
+            <p className="text-[11px] text-warning">{t("settings.passkey.emergencyActive", { path: keyLogin.data.emergencyPath })}</p>
+          )}
+        </div>
+      )}
 
       <div className="pt-2 border-t border-border flex items-center justify-between gap-2">
         <p className="text-[11px] text-muted-foreground">

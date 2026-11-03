@@ -10,8 +10,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/go-webauthn/webauthn/protocol/webauthncbor"
@@ -371,5 +373,45 @@ func TestPasskeyFlowsCappedPerIP(t *testing.T) {
 	}
 	if code, _ := h.post("/begin-login", host, `{}`, "198.51.100.78"); code != 200 {
 		t.Fatalf("别的来源不该受影响,得 %d", code)
+	}
+}
+
+func TestKeyLoginToggleGuardsAndEmergencyFile(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	s := newTGTestState(t)
+	r := gin.New()
+	r.POST("/kl", SetKeyLogin(s))
+	r.POST("/kl-session", func(c *gin.Context) { c.Set("web_session_id", int64(1)) }, SetKeyLogin(s))
+	r.POST("/settings", SaveSettings(s))
+	do := func(path, body string) int {
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(http.MethodPost, path, strings.NewReader(body)))
+		return w.Code
+	}
+	if code := do("/kl", `{"disabled":true}`); code != http.StatusForbidden {
+		t.Fatalf("不是通行证会话不能关闭密钥登录,得 %d", code)
+	}
+	if code := do("/kl-session", `{"disabled":true}`); code != 200 || !KeyLoginDisabled(s) {
+		t.Fatalf("通行证会话应能关闭,得 %d", code)
+	}
+	// 普通保存设置(前端提交的整份表单里 disableKeyLogin=false)不能把它顺手打开
+	if code := do("/settings", `{"tgChatId":"1","disableKeyLogin":false}`); code != 200 || !s.Config.Get().DisableKeyLogin {
+		t.Fatalf("保存设置不该改动密钥登录开关: %d %+v", code, s.Config.Get())
+	}
+	// 应急文件:放进去立刻恢复,删掉又关上(绕开 3 秒缓存)
+	if err := os.WriteFile(EmergencyKeyLoginPath(s), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	emergencyChecked = time.Time{}
+	if KeyLoginDisabled(s) {
+		t.Fatal("有应急文件时密钥登录应恢复")
+	}
+	os.Remove(EmergencyKeyLoginPath(s))
+	emergencyChecked = time.Time{}
+	if !KeyLoginDisabled(s) {
+		t.Fatal("删掉应急文件后应回到关闭状态")
+	}
+	if code := do("/kl", `{"disabled":false}`); code != 200 || KeyLoginDisabled(s) {
+		t.Fatalf("任何已登录会话都能重新打开密钥登录,得 %d", code)
 	}
 }

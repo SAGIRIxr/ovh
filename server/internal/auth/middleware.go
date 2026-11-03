@@ -21,6 +21,10 @@ type Config struct {
 	DeviceTokenValid func(token string) (int64, bool)
 	// WebSessionValid 通行证登录发的网页会话令牌(同样走 Bearer)。nil = 不支持
 	WebSessionValid func(token string) (int64, bool)
+	// KeyLoginDisabled 访问密钥登录是否已关闭。nil = 一直允许
+	KeyLoginDisabled func() bool
+	// InternalToken 进程内自调用的令牌,只对 /api/internal/ 下的路径有效
+	InternalToken string
 }
 
 // DefaultWhitelist 不需要 X-API-Key 即可访问的路径
@@ -80,7 +84,26 @@ func Middleware(cfg Config) gin.HandlerFunc {
 			return
 		}
 
+		// 进程内自调用(监控询价)。只认 /api/internal/,令牌不出进程
+		if cfg.InternalToken != "" && strings.HasPrefix(path, "/api/internal/") {
+			if t := c.GetHeader("X-Internal-Token"); t != "" && subtle.ConstantTimeCompare([]byte(t), []byte(cfg.InternalToken)) == 1 {
+				c.Next()
+				return
+			}
+		}
+
 		key := c.GetHeader("X-API-Key")
+
+		// 访问密钥登录已关闭:不比较、不计数,直接告诉前端改用通行证。
+		// 不比较是故意的 —— 关掉以后这个头就不该再是一个能试出对错的口子
+		if key != "" && cfg.KeyLoginDisabled != nil && cfg.KeyLoginDisabled() {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
+				"error":   "Key login disabled",
+				"message": "访问密钥登录已关闭,请用通行证登录",
+				"code":    "KEY_LOGIN_DISABLED",
+			})
+			return
+		}
 
 		// App 设备令牌:Authorization: Bearer <token>。
 		// 与 X-API-Key 同权(整个 /api 面都可用),但可单独吊销 ——

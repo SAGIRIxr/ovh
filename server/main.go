@@ -138,6 +138,7 @@ func main() {
 		}
 	}
 	usingDefaultAPIKey := state.APIKey == defaultAPIKey
+	state.InternalToken = randomHex(32)
 	state.Port = os.Getenv("PORT")
 	if state.Port == "" {
 		state.Port = "19998"
@@ -255,7 +256,12 @@ func main() {
 		// App 设备令牌校验(Bearer)。nil 安全:配对表不存在时走不到这条分支
 		DeviceTokenValid: state.DB.DeviceTokenValid,
 		WebSessionValid:  handlers.WebSessionValidator(state),
+		KeyLoginDisabled: func() bool { return handlers.KeyLoginDisabled(state) },
+		InternalToken:    state.InternalToken,
 	}))
+	if state.Config.Get().DisableKeyLogin && handlers.EmergencyKeyLoginFile(state) {
+		console.Warn("⚠️  数据目录里有应急文件 " + handlers.EmergencyKeyLoginPath(state) + ",访问密钥登录已临时恢复。用通行证进去之后记得删掉它")
+	}
 
 	// 健康检查
 	r.GET("/health", handlers.Health())
@@ -345,6 +351,8 @@ func main() {
 		api.POST("/auth/passkeys/register/finish", handlers.PasskeyRegisterFinish(state))
 		api.DELETE("/auth/passkeys/:id", handlers.DeletePasskey(state))
 		api.POST("/auth/logout", handlers.Logout(state))
+		api.GET("/auth/key-login", handlers.GetKeyLogin(state))
+		api.POST("/auth/key-login", handlers.SetKeyLogin(state))
 		api.GET("/version/check-update", handlers.CheckUpdate(state))
 		// 在线更新:下载 → 校验 → 替换自己 → 自动重启。gracefulRestart 在下面赋值,
 		// 这里用闭包间接引用,避免"路由要在 server 之前注册、server 又要在路由之后创建"的鸡生蛋

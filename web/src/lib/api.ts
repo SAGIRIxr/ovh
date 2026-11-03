@@ -101,12 +101,13 @@ function createApiClient(): AxiosInstance {
 
   // 请求拦截：自动注入 API 密钥;以及给 /server-control/* / /ovh/account/* 请求自动带上活跃账户
   client.interceptors.request.use((config) => {
+    // 有通行证会话就优先用它:设置页里顺手存下的访问密钥,在「关闭密钥登录」之后会被后端拒掉
+    const session = getSessionToken();
     const key = getApiSecretKey();
-    if (key) {
+    if (session) {
+      config.headers.set("Authorization", `Bearer ${session}`);
+    } else if (key) {
       config.headers.set("X-API-Key", key);
-    } else {
-      const session = getSessionToken();
-      if (session) config.headers.set("Authorization", `Bearer ${session}`);
     }
     // 自动注入当前账户。
     //
@@ -140,7 +141,7 @@ function createApiClient(): AxiosInstance {
       if (error.response?.status === 401) {
         const code = error.response.data?.code;
         const isAuthLevel =
-          code === "NO_API_KEY" || code === "INVALID_API_KEY" || code === "INVALID_DEVICE_TOKEN" ||
+          code === "NO_API_KEY" || code === "INVALID_API_KEY" || code === "INVALID_DEVICE_TOKEN" || code === "KEY_LOGIN_DISABLED" ||
           error.response.data?.success === undefined; // 非业务 JSON(反向代理/基础认证)也按会话失效处理
         if (isAuthLevel) {
           notifyAuthFailure();

@@ -42,13 +42,13 @@ export function AuthGate({ children }: { children: ReactNode }) {
 
   // 启动时检查一次
   useEffect(() => {
-    const stored = getApiSecretKey();
-    const session = stored ? null : getSessionToken();
+    const session = getSessionToken();
+    const stored = session ? null : getApiSecretKey();
     if (!stored && !session) {
       setState("needs-auth");
       return;
     }
-    verifyHeaders(stored ? { "X-API-Key": stored } : { Authorization: `Bearer ${session}` }).then((r) => {
+    verifyHeaders(session ? { Authorization: `Bearer ${session}` } : { "X-API-Key": stored! }).then((r) => {
       if (r.ok) {
         setState("authed");
         return;
@@ -67,7 +67,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
         return;
       }
       clearApiSecretKey();
-      setErrMsg(t(stored ? "commons.auth.storedKeyInvalid" : "commons.auth.sessionInvalid"));
+      setErrMsg(r.reason === "key-disabled" ? r.message : t(stored ? "commons.auth.storedKeyInvalid" : "commons.auth.sessionInvalid"));
       setState("needs-auth");
     });
   }, []);
@@ -85,6 +85,8 @@ export function AuthGate({ children }: { children: ReactNode }) {
       <LoginOverlay
         initialError={errMsg}
         onSuccess={(cred) => {
+          // 先清掉两种旧登录态:残留的失效会话令牌会被优先使用,刚输对的密钥反而用不上
+          clearApiSecretKey();
           if (cred.key) setApiSecretKey(cred.key);
           else if (cred.token) setSessionToken(cred.token);
           setErrMsg("");
@@ -252,7 +254,7 @@ function LoginOverlay({
  */
 type VerifyResult =
   | { ok: true }
-  | { ok: false; reason: "bad-key" | "rate-limited" | "unreachable"; message: string; retryAfter?: number };
+  | { ok: false; reason: "bad-key" | "key-disabled" | "rate-limited" | "unreachable"; message: string; retryAfter?: number };
 
 async function verifyKey(key: string): Promise<VerifyResult> {
   return verifyHeaders({ "X-API-Key": key });
@@ -275,6 +277,9 @@ async function verifyHeaders(headers: Record<string, string>): Promise<VerifyRes
     };
   }
   if (res.status === 200) return { ok: true };
+  if (res.status === 401 && res.data?.code === "KEY_LOGIN_DISABLED") {
+    return { ok: false, reason: "key-disabled", message: i18n.t("commons.auth.keyLoginDisabled") };
+  }
   if (res.status === 401) {
     return {
       ok: false,
