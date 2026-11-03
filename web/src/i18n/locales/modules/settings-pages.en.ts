@@ -180,6 +180,18 @@ const pack: SettingsPagesPack = {
       deleteConfirmDesc:
         "This cascades to delete all of the account's queue tasks, history entries and config_sniper tasks. auto_order references in monitor subscriptions pointing at this account will be cleared. This cannot be undone.",
       deleteConfirm: "Delete",
+      creds: {
+        button: "View API credentials",
+        title: "API credentials of “{{name}}”",
+        desc: "Only the first and last characters are shown by default. Enter the access key (API_SECRET_KEY in .env) to reveal the full keys; every reveal is logged.",
+        keyPlaceholder: "Access key (API_SECRET_KEY)",
+        reveal: "Reveal full keys",
+        hide: "Hide now",
+        autoHide: "Hiding automatically in {{seconds}}s",
+        copy: "Copy",
+        copied: "{{label}} copied",
+        copyFailed: "Copy failed — select and copy manually",
+      },
       latency: {
         fast: "Normal",
         slow: "Slowish",
@@ -368,6 +380,8 @@ const pack: SettingsPagesPack = {
     searchPlaceholder: "Search log content...",
     allLevels: "All levels",
     autoRefresh: "Auto refresh (5s)",
+    following: "Following latest",
+    jumpToLatest: "Jump to latest",
     systemLogs: "System logs",
     bandTotal: "Total",
     bandErrors: "Errors",

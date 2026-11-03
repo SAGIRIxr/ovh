@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"sync"
 	"time"
 )
@@ -94,4 +95,23 @@ func ResetAuthFailures() {
 	failMu.Lock()
 	failByIP = map[string]*failBucket{}
 	failMu.Unlock()
+}
+
+// VerifyKeyAgain 敏感操作(查看完整 OVH 凭据)要求再输一次访问密钥。
+//
+// 请求本身已经过了中间件,但那只说明"这个会话能调 API":浏览器里存着的密钥、
+// App 的设备令牌都能做到这一点。凭据明文一旦离开后端就收不回来,
+// 所以这里要的是"此刻坐在屏幕前的人知道密钥"。
+// 猜错同样计入按 IP 的爆破闸 —— 不能让这个接口变成一个不限次的密钥猜测口。
+// 返回值 blockedFor > 0 表示该来源已被暂时锁定。
+func VerifyKeyAgain(ip, provided, want string, now time.Time) (ok bool, blockedFor time.Duration) {
+	if blocked, wait := authBlocked(ip, now); blocked {
+		return false, wait
+	}
+	if want == "" || subtle.ConstantTimeCompare([]byte(provided), []byte(want)) != 1 {
+		recordAuthFailure(ip, now)
+		return false, 0
+	}
+	clearAuthFailures(ip)
+	return true, 0
 }

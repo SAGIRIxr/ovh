@@ -2,7 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useHideIp } from "@/hooks/use-hide-ip";
 import { useTranslation } from "react-i18next";
 import { fmtPattern } from "@/i18n/format";
-import { FileText, RefreshCw, Trash2, Search } from "lucide-react";
+import { FileText, RefreshCw, Trash2, Search, ArrowUpToLine } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { PageHeader } from "@/components/common/PageHeader";
 import { PearlSearchForm, PearlPanel, PearlPanelHead } from "@/components/pearl/ListKit";
@@ -55,16 +55,16 @@ function LogsPage() {
   const [confirmClear, setConfirmClear] = useState(false);
 
   const items = logs.data || [];
+  // 后端按时间正序给,这里倒过来:最新的在第 1 页第 1 行,不用每次翻到末页找
   const filtered = useMemo(() => {
     const s = search.trim().toLowerCase();
     return items.filter((l) => {
       if (levelFilter !== "all" && l.level !== levelFilter) return false;
       if (s && !`${l.message} ${l.source}`.toLowerCase().includes(s)) return false;
       return true;
-    });
+    }).reverse();
   }, [items, search, levelFilter]);
 
-  // 分页:日志流式追加,total 变化时 usePaged 自动夹回末页
   const PAGE_SIZE = 60;
   const { page, setPage } = usePaged(filtered.length, PAGE_SIZE);
   const pageItems = filtered.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
@@ -73,14 +73,20 @@ function LogsPage() {
     return { label: lv.slice(0, 4), value: n, failed: lv === "ERROR" ? n : 0, highlight: lv === "ERROR" };
   });
 
-  // 自动滚到底部：仅当 autoRefresh 开启且没有筛选条件（避免破坏用户的浏览位置）
-  const logEndRef = useRef<HTMLDivElement | null>(null);
+  // 跟随最新:停在第 1 页顶部时,新日志进来就保持贴顶;
+  // 用户往下翻或翻到别的页说明在看旧日志,不去抢他的滚动位置
+  const listRef = useRef<HTMLDivElement | null>(null);
+  const [atTop, setAtTop] = useState(true);
+  const following = autoRefresh && page === 1 && atTop;
+  const newestId = filtered[0]?.id;
   useEffect(() => {
-    const lastPage = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
-    if (autoRefresh && !search && levelFilter === "all" && page >= lastPage) {
-      logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-    }
-  }, [filtered, autoRefresh, search, levelFilter]);
+    if (following) listRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  }, [newestId, following]);
+  const jumpToLatest = () => {
+    setPage(1);
+    setAtTop(true);
+    listRef.current?.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
   // 面板体(加载/失败/空态/日志列表)—— 两套皮肤共用,只换外壳
   const panelBody = (
@@ -119,9 +125,12 @@ function LogsPage() {
             description={items.length === 0 ? undefined : t("logs.emptyFilteredDesc", { total: items.length })}
           />
         ) : (
-          <div className="max-h-[calc(100vh-340px)] overflow-y-auto divide-y divide-border">
+          <div
+            ref={listRef}
+            onScroll={(e) => setAtTop(e.currentTarget.scrollTop < 40)}
+            className="max-h-[calc(100vh-340px)] overflow-y-auto divide-y divide-border"
+          >
             {pageItems.map((log) => <LogRow key={log.id} log={log} />)}
-            <div ref={logEndRef} />
           </div>
         )}
     </>
@@ -205,7 +214,20 @@ function LogsPage() {
       </div>
 
       <PearlPanel>
-          <PearlPanelHead eyebrow={t("logs.systemLogs")} meta={t("logs.count", { count: filtered.length })} />
+          <PearlPanelHead
+            eyebrow={t("logs.systemLogs")}
+            meta={t("logs.count", { count: filtered.length })}
+            tools={
+              following ? (
+                <Chip tone="info">{t("logs.following")}</Chip>
+              ) : (
+                <Button size="sm" variant="outline" onClick={jumpToLatest}>
+                  <ArrowUpToLine className="w-3.5 h-3.5" />
+                  {t("logs.jumpToLatest")}
+                </Button>
+              )
+            }
+          />
           <div className="panel-body">{panelBody}</div>
           <Pager page={page} pageSize={PAGE_SIZE} total={filtered.length} onChange={setPage} />
         </PearlPanel>

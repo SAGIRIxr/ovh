@@ -3,12 +3,15 @@ package handlers
 import (
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
 	"github.com/ovh-buy/server/internal/app"
+	"github.com/ovh-buy/server/internal/auth"
 	"github.com/ovh-buy/server/internal/monitor"
 	"github.com/ovh-buy/server/internal/netfp"
 	"github.com/ovh-buy/server/internal/ovh"
@@ -182,6 +185,53 @@ func GetAccountByID(state *app.State) gin.HandlerFunc {
 			return
 		}
 		c.JSON(http.StatusOK, sanitizeAccount(acc))
+	}
+}
+
+// RevealAccountCredentials POST /api/accounts/:id/credentials
+//
+// 列表和详情接口一律只给掩码(见 sanitizeAccount),这是唯一会下发明文的出口,
+// 给"想在面板里看一眼 key、不想登服务器翻库"的场景用。三道闸:
+//   - 必须在 body 里再输一次访问密钥(API_SECRET_KEY),浏览器存的密钥 / App 设备令牌都不够;
+//   - 猜错计入与登录相同的按 IP 限流;
+//   - 用 POST + no-store,不让明文落进浏览器或代理缓存。每次查看都写一条日志。
+func RevealAccountCredentials(state *app.State) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		var body struct {
+			APIKey string `json:"apiKey"`
+		}
+		_ = c.ShouldBindJSON(&body)
+		ok, wait := auth.VerifyKeyAgain(c.ClientIP(), strings.TrimSpace(body.APIKey), state.APIKey, time.Now())
+		if wait > 0 {
+			secs := int(wait.Seconds()) + 1
+			c.Header("Retry-After", strconv.Itoa(secs))
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"error":   fmt.Sprintf("访问密钥连续错误次数过多,请约 %d 秒后再试", secs),
+				"message": fmt.Sprintf("访问密钥连续错误次数过多,请约 %d 秒后再试", secs),
+			})
+			return
+		}
+		if !ok {
+			// 不能回 401:前端会把 401 当成会话失效,直接把用户踢回登录页
+			c.JSON(http.StatusForbidden, gin.H{"error": "访问密钥不正确", "message": "访问密钥不正确"})
+			return
+		}
+		acc, found, err := state.DB.GetAccount(c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		if !found {
+			c.JSON(http.StatusNotFound, gin.H{"error": "账户不存在", "code": "EE72C3716"})
+			return
+		}
+		state.Logger.Warn(fmt.Sprintf("账户「%s」的完整 OVH 凭据已在面板中被查看(来源 %s)", acc.Name, c.ClientIP()), "system")
+		c.Header("Cache-Control", "no-store")
+		c.JSON(http.StatusOK, gin.H{
+			"appKey":      acc.AppKey,
+			"appSecret":   acc.AppSecret,
+			"consumerKey": acc.ConsumerKey,
+		})
 	}
 }
 

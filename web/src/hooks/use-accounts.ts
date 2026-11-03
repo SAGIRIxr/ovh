@@ -194,6 +194,20 @@ export function useVerifyAccount() {
   });
 }
 
+export interface AccountCredentials {
+  appKey: string;
+  appSecret: string;
+  consumerKey: string;
+}
+
+/** 查看完整凭据:要再输一次访问密钥。明文只留在调用方的组件状态里,不进 query 缓存 */
+export function useRevealCredentials() {
+  return useMutation({
+    mutationFn: async ({ id, apiKey }: { id: string; apiKey: string }) =>
+      (await api.post<AccountCredentials>(`/accounts/${id}/credentials`, { apiKey })).data,
+  });
+}
+
 /** 按 ID 查账户(从 useAccounts 缓存里找,不发请求) */
 export function findAccountByID(accounts: OVHAccount[] | undefined, id: string): OVHAccount | undefined {
   if (!accounts || !id) return undefined;

@@ -29,6 +29,7 @@ import {
   type SettingsConfig,
 } from "@/hooks/use-settings";
 import { getApiSecretKey, setApiSecretKey } from "@/lib/api";
+import { apiMessage } from "@/lib/api-error";
 import { useNotifyChannels, useTestNotification } from "@/hooks/use-notify-channels";
 import { cn } from "@/lib/utils";
 import { OVH_SUBSIDIARIES, subsidiaryLabel } from "@/lib/ovh-subsidiaries";
@@ -41,6 +42,7 @@ import {
   useDeleteAccount,
   useSetDefaultAccount,
   useVerifyAccount,
+  useRevealCredentials,
   useProxyStatus,
   useProxyTest,
   useLastProxyTest,
@@ -53,6 +55,7 @@ import {
   worstMinMs,
   proxyCheckTime,
   type OVHAccount,
+  type AccountCredentials,
   type AccountInput,
   type AccountProxyStatus,
   type ProxyTestRecord,
@@ -837,6 +840,7 @@ function AccountCard({
   const check = useProxyCheck();
   const [confirming, setConfirming] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [showingCreds, setShowingCreds] = useState(false);
   // 最近一次出口测试(在编辑框里点的)。摆在卡片上是为了让几个账户的出口 IP 并排可比。
   const lastTest = useLastProxyTest(acc.id).data;
 
@@ -904,6 +908,9 @@ function AccountCard({
           <Activity className={cn("w-3.5 h-3.5", check.isPending && "animate-pulse")} />
           {check.isPending ? t("settings.checking") : t("settings.accounts.chainCheck")}
         </Button>
+        <Button variant="ghost" size="icon" onClick={() => setShowingCreds(true)} title={t("settings.accounts.creds.button")}>
+          <KeyRound className="w-4 h-4" />
+        </Button>
         <Button variant="ghost" size="icon" onClick={() => verify.mutate(acc.id)} disabled={verify.isPending} title={t("settings.accounts.reverifyTitle")}>
           <RotateCw className={cn("w-4 h-4", verify.isPending && "animate-spin")} />
         </Button>
@@ -958,6 +965,7 @@ function AccountCard({
       )}
 
       <LinkCheckDialog acc={acc} open={checking} onOpenChange={setChecking} check={check} />
+      {showingCreds && <CredentialsDialog acc={acc} onClose={() => setShowingCreds(false)} />}
 
       <Dialog open={confirming} onOpenChange={setConfirming}>
         <DialogContent className="w-[95vw] sm:w-full sm:max-w-md">
@@ -983,6 +991,142 @@ function AccountCard({
         </DialogContent>
       </Dialog>
     </div>
+  );
+}
+
+/** 明文在屏幕上停留的上限,到点自动收起 */
+const CREDS_VISIBLE_SECONDS = 60;
+
+/** 面板常通过 http://IP:端口 打开,那不是安全上下文,navigator.clipboard 不存在 */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    // 落到下面的老办法
+  }
+  const ta = document.createElement("textarea");
+  ta.value = text;
+  ta.setAttribute("readonly", "");
+  ta.style.position = "fixed";
+  ta.style.opacity = "0";
+  document.body.appendChild(ta);
+  ta.select();
+  try {
+    return document.execCommand("copy");
+  } finally {
+    document.body.removeChild(ta);
+  }
+}
+
+/**
+ * 查看账户凭据。默认只显示掩码;再输一次访问密钥才向后端要明文,
+ * 明文只活在这个弹窗的 state 里 —— 关掉弹窗或超时就丢,不进 react-query 缓存。
+ */
+function CredentialsDialog({ acc, onClose }: { acc: OVHAccount; onClose: () => void }) {
+  const { t } = useTranslation();
+  const reveal = useRevealCredentials();
+  const [apiKey, setApiKey] = useState("");
+  const [creds, setCreds] = useState<AccountCredentials | null>(null);
+  const [left, setLeft] = useState(0);
+
+  useEffect(() => {
+    if (!creds) return;
+    setLeft(CREDS_VISIBLE_SECONDS);
+    const timer = window.setInterval(() => {
+      setLeft((n) => {
+        if (n <= 1) {
+          setCreds(null);
+          return 0;
+        }
+        return n - 1;
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [creds]);
+
+  const submit = () => {
+    if (!apiKey.trim() || reveal.isPending) return;
+    reveal.mutate(
+      { id: acc.id, apiKey: apiKey.trim() },
+      {
+        onSuccess: (data) => {
+          setApiKey("");
+          setCreds(data);
+        },
+      },
+    );
+  };
+
+  const rows: { label: string; masked: string; full?: string }[] = [
+    { label: "APP KEY", masked: acc.appKey, full: creds?.appKey },
+    { label: "APP SECRET", masked: acc.appSecret, full: creds?.appSecret },
+    { label: "CONSUMER KEY", masked: acc.consumerKey, full: creds?.consumerKey },
+  ];
+
+  return (
+    <Dialog open onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="w-[95vw] sm:w-full sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{t("settings.accounts.creds.title", { name: acc.name })}</DialogTitle>
+          <DialogDescription>
+            {creds ? t("settings.accounts.creds.autoHide", { seconds: left }) : t("settings.accounts.creds.desc")}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          {rows.map((r) => (
+            <div key={r.label} className="rounded-xl border border-border px-3 py-2">
+              <div className="text-[11px] text-muted-foreground mb-1">{r.label}</div>
+              <div className="flex items-center gap-2">
+                <span className="flex-1 font-mono text-[12px] break-all select-all">{r.full ?? r.masked}</span>
+                {r.full && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={async () => {
+                      if (await copyText(r.full!)) toast.success(t("settings.accounts.creds.copied", { label: r.label }));
+                      else toast.error(t("settings.accounts.creds.copyFailed"));
+                    }}
+                  >
+                    {t("settings.accounts.creds.copy")}
+                  </Button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+        {!creds && (
+          <form
+            className="space-y-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              submit();
+            }}
+          >
+            <Input
+              type="password"
+              autoComplete="off"
+              autoFocus
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder={t("settings.accounts.creds.keyPlaceholder")}
+            />
+            {reveal.isError && <p className="text-[11px] text-destructive">{apiMessage(reveal.error)}</p>}
+          </form>
+        )}
+        <DialogFooter>
+          {creds ? (
+            <Button variant="outline" onClick={() => setCreds(null)}>{t("settings.accounts.creds.hide")}</Button>
+          ) : (
+            <Button onClick={submit} disabled={!apiKey.trim() || reveal.isPending}>
+              {t("settings.accounts.creds.reveal")}
+            </Button>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

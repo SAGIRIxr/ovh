@@ -164,6 +164,18 @@ export const settingsPagesZh = {
       deleteConfirmDesc:
         "将级联删除该账户的所有 queue 任务、history 历史、config_sniper 任务。监控订阅的 auto_order 引用此账户的会清空。该操作不可逆。",
       deleteConfirm: "确认删除",
+      creds: {
+        button: "查看 API 凭据",
+        title: "「{{name}}」的 API 凭据",
+        desc: "默认只显示首尾几位。输入访问密钥(.env 里的 API_SECRET_KEY)可查看完整 key,每次查看都会记入日志。",
+        keyPlaceholder: "访问密钥(API_SECRET_KEY)",
+        reveal: "显示完整 key",
+        hide: "立即隐藏",
+        autoHide: "{{seconds}} 秒后自动隐藏",
+        copy: "复制",
+        copied: "已复制 {{label}}",
+        copyFailed: "复制失败,请手动选中复制",
+      },
       latency: {
         fast: "正常",
         slow: "偏慢",
@@ -334,6 +346,8 @@ export const settingsPagesZh = {
     searchPlaceholder: "搜索日志内容...",
     allLevels: "所有级别",
     autoRefresh: "自动刷新（5 秒）",
+    following: "实时跟随最新",
+    jumpToLatest: "回到最新",
     systemLogs: "系统日志",
     bandTotal: "总条数",
     bandErrors: "错误",

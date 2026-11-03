@@ -324,6 +324,7 @@ func main() {
 		api.DELETE("/accounts/:id", handlers.DeleteAccountByID(state))
 		api.POST("/accounts/:id/set-default", handlers.SetDefaultAccountByID(state))
 		api.POST("/accounts/:id/verify", handlers.VerifyAccount(state))
+		api.POST("/accounts/:id/credentials", handlers.RevealAccountCredentials(state))
 
 		// 快速下单端点 (监控的 auto-order 通过 HTTP 自调走它,前端也可直接调)
 		api.POST("/queue/quick-order", handlers.QuickOrder(state))

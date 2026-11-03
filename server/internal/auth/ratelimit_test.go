@@ -123,3 +123,27 @@ func TestWhitelistUnaffected(t *testing.T) {
 		t.Errorf("白名单路径被限流误伤了,实际 %d", w.Code)
 	}
 }
+
+// 查看凭据的二次确认不能变成一个不限次的密钥猜测口:
+// 猜错计数、超限锁定,而且与登录用的是同一把闸。
+func TestVerifyKeyAgainSharesLimiter(t *testing.T) {
+	ResetAuthFailures()
+	now := time.Now()
+	if ok, _ := VerifyKeyAgain("10.0.0.9", "correct-key", "correct-key", now); !ok {
+		t.Fatal("密钥正确应通过")
+	}
+	if ok, _ := VerifyKeyAgain("10.0.0.9", "", "", now); ok {
+		t.Fatal("服务端没有密钥时不能放行空串")
+	}
+	for i := 0; i < MaxAuthFailures; i++ {
+		VerifyKeyAgain("10.0.0.9", "wrong", "correct-key", now)
+	}
+	ok, wait := VerifyKeyAgain("10.0.0.9", "correct-key", "correct-key", now)
+	if ok || wait <= 0 {
+		t.Fatalf("超限后即使密钥正确也应被锁定,得 ok=%v wait=%v", ok, wait)
+	}
+	if blocked, _ := authBlocked("10.0.0.9", now); !blocked {
+		t.Fatal("二次确认的失败应计入登录同一把闸")
+	}
+	ResetAuthFailures()
+}
