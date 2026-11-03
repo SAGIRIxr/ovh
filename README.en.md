@@ -121,7 +121,7 @@ docker run -d --name ovh-console \
   ghcr.io/sagirixr/ovh:latest
 ```
 
-The image is built by a GitHub Action on every push to main and published to `ghcr.io/sagirixr/ovh`, for `linux/amd64` and `linux/arm64`.
+The image is built by a GitHub Action on every push to main and published to `ghcr.io/sagirixr/ovh` and Docker Hub `sagirixr/ovh`, for `linux/amd64` and `linux/arm64`.
 
 **All data lives under the single `/data` directory**: the SQLite database, the **database encryption key** (`.env`), caches, and logs. Back up that directory and you have everything.
 

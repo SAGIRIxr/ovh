@@ -25,8 +25,6 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    env:
-      DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -85,15 +83,23 @@ jobs:
           build windows amd64
           cd ../dist && sha256sum ovh-server-* > checksums.txt && cat checksums.txt
 
+      # 用户名和令牌都配了才推 Docker Hub:只配一半时登录必挂,会拖垮整次发版
       - name: 镜像名
         id: img
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
         run: |
+          hub=false
+          if [ -n "$DOCKERHUB_USERNAME" ] && [ -n "$DOCKERHUB_TOKEN" ]; then hub=true; fi
+          echo "hub=$hub" >> "$GITHUB_OUTPUT"
           {
             echo "names<<EOF"
             echo "ghcr.io/${GITHUB_REPOSITORY,,}"
-            if [ -n "$DOCKERHUB_USERNAME" ]; then echo "$DOCKERHUB_USERNAME/ovh"; fi
+            if [ "$hub" = true ]; then echo "$DOCKERHUB_USERNAME/ovh"; fi
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+          echo "Docker Hub: $hub" >> "$GITHUB_STEP_SUMMARY"
 
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
@@ -105,7 +111,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/login-action@v3
-        if: env.DOCKERHUB_USERNAME != ''
+        if: steps.img.outputs.hub == 'true'
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}

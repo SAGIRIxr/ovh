@@ -124,7 +124,7 @@ docker run -d --name ovh-console \
   ghcr.io/sagirixr/ovh:latest
 ```
 
-镜像由推送 main 时的 GitHub Action 自动构建并推到 `ghcr.io/sagirixr/ovh`,提供 `linux/amd64` 与 `linux/arm64`。
+镜像由推送 main 时的 GitHub Action 自动构建并推到 `ghcr.io/sagirixr/ovh` 和 Docker Hub `sagirixr/ovh`,提供 `linux/amd64` 与 `linux/arm64`。
 
 **数据全在 `/data` 这一个目录下**:SQLite 数据库、**数据库加密密钥**(`.env`)、缓存、日志。备份就备份这个目录。
 
