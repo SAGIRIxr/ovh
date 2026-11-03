@@ -13,7 +13,7 @@
 
 services:
   ovh-console:
-    image: ghcr.io/sagirixr/ovh:latest
+    image: sagirixr/ovh:latest
     container_name: ovh-console
     restart: unless-stopped
 

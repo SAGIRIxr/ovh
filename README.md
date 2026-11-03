@@ -105,13 +105,36 @@ docker pull ghcr.io/sagirixr/ovh:latest
 
 ### 方式 A:Docker(推荐)
 
-```bash
-# 拿一份 docker-compose.yml,改掉里面的 API_SECRET_KEY,然后:
-docker compose up -d
+新建一个目录,放一个 `docker-compose.yml`:
 
-# 更新
-docker compose pull && docker compose up -d
+```yaml
+services:
+  ovh-console:
+    image: sagirixr/ovh:latest          # 或 ghcr.io/sagirixr/ovh:latest
+    container_name: ovh-console
+    restart: unless-stopped
+    ports:
+      # 只绑本机,远程访问走反代;确实要直接对外就改成 "20000:20000"
+      - "127.0.0.1:20000:20000"
+    volumes:
+      - ./data:/data                    # 数据库、加密密钥、日志都在这,备份它就够了
+    environment:
+      API_SECRET_KEY: 换成你自己的随机串  # 网页登录用的访问密钥,openssl rand -hex 24 生成一个
+      TZ: Asia/Shanghai
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 ```
+
+```bash
+docker compose up -d                              # 启动,浏览器打开 http://127.0.0.1:20000
+docker compose pull && docker compose up -d       # 更新
+docker compose logs -f                            # 看日志
+```
+
+仓库根目录的 [docker-compose.yml](docker-compose.yml) 是带完整注释的版本(配合 `.env.example` 使用)。
 
 或者直接 run:
 

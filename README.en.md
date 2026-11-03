@@ -102,13 +102,36 @@ See [server/README.md](server/README.md) for detailed backend documentation.
 
 ### Option A: Docker (recommended)
 
-```bash
-# Grab a docker-compose.yml, change the API_SECRET_KEY inside, then:
-docker compose up -d
+Create a directory with this `docker-compose.yml`:
 
-# Updating
-docker compose pull && docker compose up -d
+```yaml
+services:
+  ovh-console:
+    image: sagirixr/ovh:latest          # or ghcr.io/sagirixr/ovh:latest
+    container_name: ovh-console
+    restart: unless-stopped
+    ports:
+      # Loopback only; use a reverse proxy for remote access, or "20000:20000" to expose it directly
+      - "127.0.0.1:20000:20000"
+    volumes:
+      - ./data:/data                    # database, encryption key and logs — back up this directory
+    environment:
+      API_SECRET_KEY: change-me         # web login key; generate one with openssl rand -hex 24
+      TZ: Asia/Shanghai
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 ```
+
+```bash
+docker compose up -d                              # start, then open http://127.0.0.1:20000
+docker compose pull && docker compose up -d       # update
+docker compose logs -f                            # logs
+```
+
+The repo-root [docker-compose.yml](docker-compose.yml) is the fully commented version (used with `.env.example`).
 
 Or run directly:
 
