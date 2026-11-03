@@ -6,6 +6,7 @@ import { AppPairingSection } from "@/components/settings/AppPairingSection";
 import { Smartphone } from "lucide-react";
 import type { ThemeMode } from "@/lib/theme";
 import { useEffect, useState } from "react";
+import { copyText } from "@/lib/clipboard";
 import { useTranslation } from "react-i18next";
 import { fmtDate, fmtDateTime } from "@/i18n/format";
 import { toast } from "sonner";
@@ -996,30 +997,6 @@ function AccountCard({
 
 /** 明文在屏幕上停留的上限,到点自动收起 */
 const CREDS_VISIBLE_SECONDS = 60;
-
-/** 面板常通过 http://IP:端口 打开,那不是安全上下文,navigator.clipboard 不存在 */
-async function copyText(text: string): Promise<boolean> {
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(text);
-      return true;
-    }
-  } catch {
-    // 落到下面的老办法
-  }
-  const ta = document.createElement("textarea");
-  ta.value = text;
-  ta.setAttribute("readonly", "");
-  ta.style.position = "fixed";
-  ta.style.opacity = "0";
-  document.body.appendChild(ta);
-  ta.select();
-  try {
-    return document.execCommand("copy");
-  } finally {
-    document.body.removeChild(ta);
-  }
-}
 
 /**
  * 查看账户凭据。默认只显示掩码;再输一次访问密钥才向后端要明文,

@@ -638,6 +638,8 @@ function AddSubscriptionDialog({
       setPicked({});
       setExtraOptions(opts);
     }
+    // 订阅的机房是逗号分隔的文本框,和 DATACENTER= 同一格式,原样填进去
+    if (p.datacenter !== undefined) setDatacenters(p.datacenter);
   };
 
   // 每次打开都按当前 editing 重灌一次表单。依赖里带上 open,

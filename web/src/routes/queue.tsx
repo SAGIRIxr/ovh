@@ -11,6 +11,9 @@ import {
   Plus,
   Pencil,
   Loader2,
+  Copy,
+  Share2,
+  ChevronDown,
 } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -46,7 +49,17 @@ import {
   type QueueItem,
   usePurchaseTimings,
   type PurchaseTiming,
+  useCopyQueueItems,
 } from "@/hooks/use-queue";
+import {
+  QueueFilters,
+  applyQueueFilters,
+  accountLabel,
+  EMPTY_QUEUE_FILTERS,
+  type QueueFilterState,
+} from "@/components/queue/QueueFilters";
+import { buildShareText, parseDatacenterList, taskKey } from "@/lib/queue-share";
+import { copyText } from "@/lib/clipboard";
 import { useServers } from "@/hooks/use-servers";
 import { OVH_DATACENTERS as OVH_DC_LIST, apiDatacenterCode } from "@/lib/datacenters";
 import { RETRY_INTERVAL, useSettings } from "@/hooks/use-settings";
@@ -178,8 +191,46 @@ function QueuePage() {
   }, [createPlanCode, createOptions]);
 
   const items = queue.data || [];
+  const accountsQ = useAccounts();
   const [filter, setFilter] = useState<QueueFilter>("all");
-  const visibleItems = items.filter((item) => filter === "all" || item.status === filter || (filter === "running" && item.status === "pending"));
+  // 账户 / 机型 / 机房 / 搜索 / 分组,按浏览器记住(只是个人习惯,读写失败就当没记过)
+  const [filters, setFiltersState] = useState<QueueFilterState>(() => {
+    try {
+      const raw = localStorage.getItem("ovh_queue_filters");
+      return raw ? { ...EMPTY_QUEUE_FILTERS, ...JSON.parse(raw) } : EMPTY_QUEUE_FILTERS;
+    } catch {
+      return EMPTY_QUEUE_FILTERS;
+    }
+  });
+  const setFilters = (next: QueueFilterState) => {
+    setFiltersState(next);
+    setSelected(new Set());
+    try {
+      localStorage.setItem("ovh_queue_filters", JSON.stringify(next));
+    } catch {
+      // 隐私模式等存不了,不影响本次使用
+    }
+  };
+  // 记住的筛选值在队列里已经不存在了(任务删光 / 账户删了),当没筛,
+  // 否则用户看到一片空列表却找不到是哪个下拉卡住的
+  const effectiveFilters: QueueFilterState = {
+    ...filters,
+    account: items.some((i) => i.accountId === filters.account) ? filters.account : "",
+    plan: items.some((i) => i.planCode === filters.plan) ? filters.plan : "",
+    dc: items.some((i) => apiDatacenterCode(i.datacenter) === filters.dc) ? filters.dc : "",
+  };
+  // 状态 tab 上的数字跟着上面的筛选走
+  const filteredItems = applyQueueFilters(items, effectiveFilters, accountsQ.data);
+  const visibleItems = filteredItems.filter((item) => filter === "all" || item.status === filter || (filter === "running" && item.status === "pending"));
+  const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // 「复制任务」:单条走新建对话框(可改),多条走批量复制对话框
+  const [copyItem, setCopyItem] = useState<QueueItem | null>(null);
+  const [showBatchCopy, setShowBatchCopy] = useState(false);
+  const shareItems = async (targets: QueueItem[]) => {
+    if (targets.length === 0) return;
+    if (await copyText(buildShareText(targets))) toast.success(t("queue.share.copied", { n: targets.length }));
+    else toast.error(t("queue.share.copyFailed"));
+  };
 
   // —— 批量操作 ——
   // 一条 /buy 或一次网页建单最多扇出 60 个任务(MAX_ORDER_FANOUT),
@@ -198,7 +249,7 @@ function QueuePage() {
       const next = new Set([...prev].filter((id) => alive.has(id)));
       return next.size === prev.size ? prev : next;
     });
-  }, [items]);
+  }, [items, filter, filters]);
 
   const selectedItems = items.filter((i) => selected.has(i.id));
   const toggleSelect = (id: string) =>
@@ -260,8 +311,8 @@ function QueuePage() {
         <Card>
           <EmptyState
             icon={ClipboardList}
-            title={t(filter === "all" ? "queue.emptyTitle" : "queue.filterEmpty")}
-            description={t(filter === "all" ? "queue.emptyDesc" : "queue.filterEmptyHint")}
+            title={t(filter === "all" && items.length === 0 ? "queue.emptyTitle" : "queue.filterEmpty")}
+            description={t(filter === "all" && items.length === 0 ? "queue.emptyDesc" : "queue.filterEmptyHint")}
           />
         </Card>
       ) : (
@@ -295,6 +346,12 @@ function QueuePage() {
                 >
                   <PlayCircle className="w-3.5 h-3.5" />{t("queue.resume")}
                 </Button>
+                <Button size="sm" variant="outline" disabled={batchRunning} onClick={() => setShowBatchCopy(true)}>
+                  <Copy className="w-3.5 h-3.5" />{t("queue.copy.batchAction")}
+                </Button>
+                <Button size="sm" variant="outline" disabled={batchRunning} onClick={() => void shareItems(selectedItems)}>
+                  <Share2 className="w-3.5 h-3.5" />{t("queue.share.action")}
+                </Button>
                 {/* 删除是不可逆的,单独走二次确认,不能和暂停放同一个手势层级 */}
                 <Button
                   size="sm"
@@ -311,7 +368,45 @@ function QueuePage() {
               </div>
             </div>
           )}
-          {visibleItems.map((q) => (
+          {groupItems(visibleItems, effectiveFilters.groupBy, accountsQ.data).map((g) => {
+            const open = !collapsed.has(g.key);
+            const groupSelected = g.items.every((i) => selected.has(i.id));
+            return (
+            <div key={g.key || "all"} className="space-y-3">
+              {g.key && (
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <button
+                    type="button"
+                    aria-expanded={open}
+                    onClick={() =>
+                      setCollapsed((prev) => {
+                        const next = new Set(prev);
+                        next.has(g.key) ? next.delete(g.key) : next.add(g.key);
+                        return next;
+                      })
+                    }
+                    className="inline-flex items-center gap-1.5 text-[13px] font-semibold hover:text-foreground/80"
+                  >
+                    <ChevronDown className={"w-4 h-4 transition-transform " + (open ? "" : "-rotate-90")} />
+                    <span className={effectiveFilters.groupBy === "plan" ? "font-mono" : undefined}>{g.label}</span>
+                    <span className="text-[12px] font-normal text-muted-foreground tabular-nums">{g.items.length}</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setSelected((prev) => {
+                        const next = new Set(prev);
+                        for (const i of g.items) groupSelected ? next.delete(i.id) : next.add(i.id);
+                        return next;
+                      })
+                    }
+                    className="text-[12px] text-muted-foreground underline underline-offset-2 hover:text-foreground"
+                  >
+                    {groupSelected ? t("queue.filters.unselectGroup") : t("queue.filters.selectGroup")}
+                  </button>
+                </div>
+              )}
+              {open && g.items.map((q) => (
             <QueueRow
               key={q.id}
               item={q}
@@ -332,8 +427,16 @@ function QueuePage() {
                 setShowCreateDialog(true);
               }}
               onDelete={() => remove.mutate(q.id)}
+              onCopy={() => {
+                setCopyItem(q);
+                setShowCreateDialog(true);
+              }}
+              onShare={() => void shareItems([q])}
             />
           ))}
+            </div>
+            );
+          })}
         </div>
       )}
     </>
@@ -390,7 +493,9 @@ function QueuePage() {
         <PearlPanel>
           <PearlPanelHead eyebrow={t("queue.title")} meta={`${items.length}`} />
           <div className="panel-body" style={{ paddingTop: 14 }}>
-            <div className={dense ? "space-y-1.5 queue-dense" : "space-y-3"}>{!queue.isPending && !queue.isError && <QueueStatusFilter items={items} value={filter} onChange={(next) => { setFilter(next); setSelected(new Set()); }} />}
+            <div className={dense ? "space-y-1.5 queue-dense" : "space-y-3"}>{!queue.isPending && !queue.isError && items.length > 0 && (
+              <QueueFilters items={items} accounts={accountsQ.data} value={effectiveFilters} onChange={setFilters} shown={filteredItems.length} />
+            )}{!queue.isPending && !queue.isError && <QueueStatusFilter items={filteredItems} value={filter} onChange={(next) => { setFilter(next); setSelected(new Set()); }} />}
       {queueBody}</div>
           </div>
         </PearlPanel>
@@ -444,24 +549,160 @@ function QueuePage() {
         </DialogContent>
       </Dialog>
 
+      <BatchCopyDialog
+        open={showBatchCopy}
+        onOpenChange={setShowBatchCopy}
+        items={selectedItems}
+        existing={items}
+        onDone={() => setSelected(new Set())}
+      />
+
       <CreateQueueDialog
-        key={editingItem?.id || "new"}
+        key={editingItem?.id || (copyItem ? `copy-${copyItem.id}` : "new")}
         editing={editingItem}
+        copyFrom={copyItem}
         open={showCreateDialog}
         onOpenChange={(v) => {
           setShowCreateDialog(v);
           if (!v) {
             setEditingItem(null);
+            setCopyItem(null);
             setPrefillPlanCode("");
             setPrefillOptions("");
             // 清掉 URL 上的 create / options 参数
             navigate({ search: () => ({}) as any, replace: true });
           }
         }}
-        initialPlanCode={editingItem?.planCode || prefillPlanCode}
-        initialOptions={editingItem ? (editingItem.options || []).join(",") : prefillOptions}
+        initialPlanCode={editingItem?.planCode || copyItem?.planCode || prefillPlanCode}
+        initialOptions={editingItem || copyItem ? ((editingItem || copyItem)!.options || []).join(",") : prefillOptions}
       />
     </div>
+  );
+}
+
+/** 按账户 / 机型分组;不分组时整体算一组(key 为空,不画组头) */
+function groupItems(
+  items: QueueItem[],
+  by: QueueFilterState["groupBy"],
+  accounts: ReturnType<typeof useAccounts>["data"]
+): { key: string; label: string; items: QueueItem[] }[] {
+  if (by === "none") return [{ key: "", label: "", items }];
+  const groups = new Map<string, QueueItem[]>();
+  for (const it of items) {
+    const k = by === "account" ? it.accountId || "?" : it.planCode;
+    groups.set(k, [...(groups.get(k) || []), it]);
+  }
+  return [...groups.entries()]
+    .map(([k, list]) => ({ key: `${by}:${k}`, label: by === "account" ? accountLabel(accounts, k) : k, items: list }))
+    .sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/** 把选中的任务复制到别的账户。同账户不复制;目标账户已有同机房同配置的任务就跳过 */
+function BatchCopyDialog({
+  open,
+  onOpenChange,
+  items,
+  existing,
+  onDone,
+}: {
+  open: boolean;
+  onOpenChange: (v: boolean) => void;
+  items: QueueItem[];
+  existing: QueueItem[];
+  onDone: () => void;
+}) {
+  const { t } = useTranslation();
+  const accountsQ = useAccounts();
+  const accounts = accountsQ.data || [];
+  const copy = useCopyQueueItems();
+  const [targets, setTargets] = useState<Set<string>>(new Set());
+  const [keepAutoPay, setKeepAutoPay] = useState(false);
+  useEffect(() => {
+    if (open) {
+      setTargets(new Set());
+      setKeepAutoPay(false);
+    }
+  }, [open]);
+  const autoPayCount = items.filter((i) => i.autoPay).length;
+  // 每个任务复制到每个「不是它自己账户」的目标;和 useCopyQueueItems 同一套判重,
+  // 确认前就说清楚会新建几个、跳过几个
+  const { planned, duplicates } = useMemo(() => {
+    const live = new Set(existing.filter((q) => q.status !== "completed" && q.status !== "failed").map(taskKey));
+    let planned = 0;
+    let duplicates = 0;
+    for (const accountId of targets) {
+      for (const it of items) {
+        if (it.accountId === accountId) continue;
+        const key = taskKey({ ...it, accountId });
+        if (live.has(key)) duplicates++;
+        else {
+          live.add(key);
+          planned++;
+        }
+      }
+    }
+    return { planned, duplicates };
+  }, [existing, items, targets]);
+
+  const run = async () => {
+    const r = await copy.mutateAsync({ items, accountIds: [...targets], keepAutoPay, existing });
+    if (r.failed === 0) toast.success(t("queue.copy.done", { created: r.created, skipped: r.skipped }));
+    else toast.error(t("queue.copy.partial", { created: r.created, skipped: r.skipped, failed: r.failed, error: r.firstError }));
+    onOpenChange(false);
+    onDone();
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={(v) => !copy.isPending && onOpenChange(v)}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{t("queue.copy.batchTitle", { n: items.length })}</DialogTitle>
+          <DialogDescription>{t("queue.copy.batchDesc")}</DialogDescription>
+        </DialogHeader>
+        <div className="space-y-2">
+          {accounts.map((a) => (
+            <label key={a.id} className="flex items-center gap-2 cursor-pointer text-[13px] rounded-xl border border-border px-3 py-2 hover:bg-muted/40">
+              <Checkbox
+                checked={targets.has(a.id)}
+                onCheckedChange={(v) =>
+                  setTargets((prev) => {
+                    const next = new Set(prev);
+                    v ? next.add(a.id) : next.delete(a.id);
+                    return next;
+                  })
+                }
+              />
+              <span className="font-medium">{a.name}</span>
+              <span className="text-muted-foreground">{a.zone} · {a.endpoint}</span>
+              <span className="ml-auto text-[11px] text-muted-foreground">
+                {t("queue.copy.fromCount", { n: items.filter((i) => i.accountId === a.id).length })}
+              </span>
+            </label>
+          ))}
+          {autoPayCount > 0 && (
+            <div>
+              <label className="flex items-center gap-2 cursor-pointer text-[13px]">
+                <Checkbox checked={keepAutoPay} onCheckedChange={(v) => setKeepAutoPay(!!v)} />
+                {t("queue.copy.keepAutoPay")}
+              </label>
+              <p className={"text-[11px] mt-1 " + (keepAutoPay ? "text-warning" : "text-muted-foreground")}>
+                {keepAutoPay ? t("queue.copy.keepAutoPayOn", { n: autoPayCount }) : t("queue.copy.keepAutoPayOff", { n: autoPayCount })}
+              </p>
+            </div>
+          )}
+          <p className="text-[12px] text-muted-foreground">{t("queue.copy.planned", { n: planned, dup: duplicates })}</p>
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={copy.isPending}>
+            {t("queue.cancel")}
+          </Button>
+          <Button onClick={() => void run()} disabled={copy.isPending || planned === 0}>
+            {copy.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <Copy className="w-4 h-4" />}
+            {t("queue.copy.confirm", { n: planned })}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -472,12 +713,15 @@ function CreateQueueDialog({
   initialPlanCode,
   initialOptions,
   editing,
+  copyFrom,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   initialPlanCode?: string;
   initialOptions?: string;
   editing?: QueueItem | null;
+  /** 复制任务:以这条为模板新建,账户默认换成另一个 */
+  copyFrom?: QueueItem | null;
 }) {
   const { t } = useTranslation();
   const create = useCreateQueueItem();
@@ -553,9 +797,24 @@ function CreateQueueDialog({
         setAutoPay(!!editing.autoPay);
         setCoupon(editing.coupon || "");
         setCouponFallback(!!editing.couponFallback);
+      } else if (copyFrom) {
+        // 复制给别的账户用:默认挑第一个不是原任务账户的
+        const other = accounts?.find((a) => a.id !== copyFrom.accountId);
+        setSelectedAccountId(other?.id || copyFrom.accountId);
+        setDatacenters([OVH_DATACENTERS.find((dc) => apiDatacenterCode(dc.code) === apiDatacenterCode(copyFrom.datacenter))?.code || copyFrom.datacenter]);
+        setRetryInterval(String(copyFrom.retryInterval || cfgDefault));
+        touchedRef.current = true;
+        // 换了账户就换了钱包:自动付款不跟着复制,要用户自己再勾
+        setAutoPay(false);
+        setCoupon(copyFrom.coupon || "");
+        setCouponFallback(false);
+        if (copyFrom.fqn) {
+          setManualFqn(copyFrom.fqn);
+          setManualOpen(true);
+        }
       }
     }
-  }, [initialPlanCode, open, editing]);
+  }, [initialPlanCode, open, editing, copyFrom]);
 
   /** planCode 匹配到的服务器（用于显示名称提示） */
   const matchedServer = useMemo(
@@ -598,7 +857,8 @@ function CreateQueueDialog({
     } else {
       setPicked({});
       setExtraInput("");
-      setManualFqn("");
+      // 属于当前型号的 FQN 不清(复制任务 / 目录晚到时型号没变,FQN 还有效)
+      setManualFqn((f) => (f.trim().toLowerCase().startsWith(code.toLowerCase() + ".") ? f : ""));
     }
   }, [planCode, initialOptions, initialPlanCode, matchedServer]);
 
@@ -615,6 +875,11 @@ function CreateQueueDialog({
     }
     if (p.fqn !== undefined || switched) setManualFqn(p.fqn ?? "");
     if (p.fqn) setManualOpen(true);
+    if (p.datacenter !== undefined) {
+      const { codes, unknown } = parseDatacenterList(p.datacenter);
+      if (codes.length > 0) setDatacenters(codes);
+      if (unknown.length > 0) toast.warning(t("queue.manual.unknownDc", { dcs: unknown.join(", ") }));
+    }
   };
 
   /** 按组拆分该机型的所有可选 addon */
@@ -730,7 +995,8 @@ function CreateQueueDialog({
       coupon,
       couponFallback: autoPay && couponFallback,
       preorder: !!matchedServer?.prerelease,
-      force,
+      // 原任务是强制入队的,复制出来的也强制(型号多半还没上架,不强制会被直接拒)
+      force: force || (!!copyFrom?.force && copyFrom.planCode === planCode.trim()),
       fqn: effectiveFqn || undefined,
     });
     if (result.success > 0) {
@@ -753,9 +1019,13 @@ function CreateQueueDialog({
     <Dialog open={open} onOpenChange={handleClose}>
       <DialogContent className="w-[95vw] sm:w-full sm:max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{editing ? t("queue.editTitle") : t("queue.createTitle")}</DialogTitle>
+          <DialogTitle>{editing ? t("queue.editTitle") : copyFrom ? t("queue.copy.dialogTitle") : t("queue.createTitle")}</DialogTitle>
           <DialogDescription>
-            {editing ? t("queue.editDesc") : t("queue.createDesc")}
+            {editing
+              ? t("queue.editDesc")
+              : copyFrom
+                ? t("queue.copy.dialogDesc", { account: findAccountByID(accounts, copyFrom.accountId)?.name || copyFrom.accountId.slice(0, 8) })
+                : t("queue.createDesc")}
           </DialogDescription>
         </DialogHeader>
 
@@ -1145,6 +1415,8 @@ export function QueueRow({
   onToggle,
   onDelete,
   onEdit,
+  onCopy,
+  onShare,
 }: {
   item: QueueItem;
   timing?: PurchaseTiming;
@@ -1153,6 +1425,8 @@ export function QueueRow({
   onToggle: () => void;
   onDelete: () => void;
   onEdit: () => void;
+  onCopy: () => void;
+  onShare: () => void;
 }) {
   const { t } = useTranslation();
   const chip = (() => {
@@ -1301,6 +1575,12 @@ export function QueueRow({
               {item.status === "paused" ? t("queue.resume") : t("queue.pause")}
             </Button>
           )}
+          <Button variant="ghost" size="icon" onClick={onCopy} aria-label={t("queue.copy.action")} title={t("queue.copy.action")}>
+            <Copy className="w-4 h-4" />
+          </Button>
+          <Button variant="ghost" size="icon" onClick={onShare} aria-label={t("queue.share.rowAction")} title={t("queue.share.rowAction")}>
+            <Share2 className="w-4 h-4" />
+          </Button>
           <Button variant="ghost" size="icon" onClick={onDelete} aria-label={t("queue.delete")}>
             <X className="w-4 h-4" />
           </Button>

@@ -6,6 +6,7 @@ import i18n from "@/i18n";
 import { apiMessage } from "@/lib/api-error";
 import { clampOrderPlan, MAX_ORDER_QUANTITY, MAX_ORDER_FANOUT } from "@/lib/order-limits";
 import { errorMessage } from "@/components/common/LoadFailed";
+import { taskKey } from "@/lib/queue-share";
 
 export type QueueStatus = "pending" | "running" | "paused" | "completed" | "failed";
 
@@ -234,5 +235,66 @@ export function useClearQueue() {
       toast.success(i18n.t("hooksMsg.queue.cleared"));
     },
     onError: (e: any) => toast.error(apiMessage(e) || i18n.t("hooksMsg.queue.clearFailed")),
+  });
+}
+
+/**
+ * 把已有任务原样复制到别的账户:型号、机房、配置、FQN、重试间隔、优惠码、强制入队都照搬。
+ * keepAutoPay=false 时复制出来的一律不自动付款 —— 换了账户就换了钱包,得用户自己点头。
+ * 目标账户已有同机房同配置的任务(没结束的)就跳过,免得一台机器排两条队、抢到两单。
+ */
+export function useCopyQueueItems() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (payload: {
+      items: QueueItem[];
+      accountIds: string[];
+      keepAutoPay: boolean;
+      /** 判重用的现有队列 */
+      existing: QueueItem[];
+    }) => {
+      const live = new Set(
+        payload.existing.filter((q) => q.status !== "completed" && q.status !== "failed").map(taskKey)
+      );
+      let created = 0;
+      let skipped = 0;
+      let failed = 0;
+      let firstError = "";
+      for (const accountId of payload.accountIds) {
+        for (const it of payload.items) {
+          if (it.accountId === accountId) continue;
+          const key = taskKey({ ...it, accountId });
+          if (live.has(key)) {
+            skipped++;
+            continue;
+          }
+          try {
+            await api.post("/queue", {
+              account_id: accountId,
+              planCode: it.planCode,
+              datacenter: it.datacenter,
+              retryInterval: it.retryInterval,
+              options: it.options || [],
+              autoPay: payload.keepAutoPay && !!it.autoPay,
+              preorder: !!it.preorder,
+              force: !!it.force,
+              coupon: it.coupon || undefined,
+              couponFallback: payload.keepAutoPay && !!it.autoPay && !!it.couponFallback,
+              fqn: it.fqn || undefined,
+            });
+            live.add(key);
+            created++;
+          } catch (e: any) {
+            failed++;
+            if (!firstError) firstError = apiMessage(e) || errorMessage(e);
+          }
+        }
+      }
+      return { created, skipped, failed, firstError };
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: qk.queue.list() });
+      qc.invalidateQueries({ queryKey: qk.stats() });
+    },
   });
 }

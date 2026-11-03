@@ -13,21 +13,34 @@ export interface ManualConfig {
   planCode?: string;
   fqn?: string;
   options?: string;
+  /** DATACENTER=gra,rbx(ovh-auto-buy 同名变量,逗号分隔) */
+  datacenter?: string;
+  /** 文本里有几组配置(以 PLANCODE 分组)。只用第一组,多出来的要提示 */
+  blocks: number;
 }
 
-/** 解析 PLANCODE= / FQN= / OPTIONS= 形式的文本(ovh-auto-buy 的环境变量写法)。
- *  兼容 docker-compose 的「- KEY=value」、.env 的「export KEY=value」、带引号的值和「KEY: value」。 */
+/** 解析 PLANCODE= / FQN= / OPTIONS= / DATACENTER= 形式的文本(ovh-auto-buy 的环境变量写法)。
+ *  兼容 docker-compose 的「- KEY=value」、.env 的「export KEY=value」、带引号的值和「KEY: value」。
+ *  「# 」开头的注释行忽略。一段文本里有多组(分享多个任务时)只取第一组。 */
 export function parseManualConfig(text: string): ManualConfig {
-  const out: ManualConfig = {};
+  const out: ManualConfig = { blocks: 0 };
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.trim().replace(/^-\s*/, "").replace(/^export\s+/i, "");
     const m = line.match(/^([A-Za-z_]+)\s*[=:]\s*(.*)$/);
     if (!m) continue;
     const val = m[2].trim().replace(/^["']|["']$/g, "").trim();
-    switch (m[1].toUpperCase()) {
+    const key = m[1].toUpperCase();
+    if (key === "PLANCODE" || key === "PLAN_CODE") out.blocks++;
+    // 第二组开始的内容一律不要,免得 FQN / OPTIONS 被后面那组覆盖成别的型号的
+    if (out.blocks > 1) continue;
+    switch (key) {
       case "PLANCODE":
       case "PLAN_CODE":
         out.planCode = val;
+        break;
+      case "DATACENTER":
+      case "DATACENTERS":
+        out.datacenter = val;
         break;
       case "FQN":
         out.fqn = val;
@@ -120,11 +133,13 @@ export function ManualConfigSection({
       parsed.planCode && "PLANCODE",
       parsed.fqn !== undefined && "FQN",
       parsed.options !== undefined && "OPTIONS",
+      parsed.datacenter !== undefined && "DATACENTER",
     ].filter(Boolean);
     if (hits.length === 0) return;
     onPaste(parsed);
     setPaste("");
     toast.success(t("queue.manual.recognized", { keys: hits.join(" / ") }));
+    if (parsed.blocks > 1) toast.warning(t("queue.manual.multiBlock", { n: parsed.blocks }));
   };
 
   const code = planCode.trim().toLowerCase();
