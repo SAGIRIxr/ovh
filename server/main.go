@@ -218,8 +218,8 @@ func main() {
 		r.Use(func(c *gin.Context) {
 			if !proxyWarned.Load() && c.GetHeader("X-Forwarded-For") != "" {
 				if ip := net.ParseIP(c.RemoteIP()); ip != nil && (ip.IsLoopback() || ip.IsPrivate()) && proxyWarned.CompareAndSwap(false, true) {
-					console.Warn("⚠️  请求经反向代理转发(来自 "+c.RemoteIP()+"),但没设 TRUSTED_PROXIES:密钥限流和日志都会把所有人算成这一个地址。"+
-						"在配置里加 TRUSTED_PROXIES="+c.RemoteIP()+" 后重启")
+					console.Warn("⚠️  请求经反向代理转发(来自 " + c.RemoteIP() + "),但没设 TRUSTED_PROXIES:密钥限流和日志都会把所有人算成这一个地址。" +
+						"在配置里加 TRUSTED_PROXIES=" + c.RemoteIP() + " 后重启")
 				}
 			}
 			c.Next()
@@ -254,6 +254,7 @@ func main() {
 		WhitelistPaths: auth.DefaultWhitelist(),
 		// App 设备令牌校验(Bearer)。nil 安全:配对表不存在时走不到这条分支
 		DeviceTokenValid: state.DB.DeviceTokenValid,
+		WebSessionValid:  handlers.WebSessionValidator(state),
 	}))
 
 	// 健康检查
@@ -336,6 +337,14 @@ func main() {
 		api.POST("/app/pairing-codes", handlers.CreatePairingCode(state))
 		api.GET("/app/devices", handlers.ListAppDevices(state))
 		api.DELETE("/app/devices/:id", handlers.RevokeAppDevice(state))
+		// 通行证:登录两步免鉴权(白名单),其余都要先登录
+		api.POST("/auth/passkey/login/begin", handlers.PasskeyLoginBegin(state))
+		api.POST("/auth/passkey/login/finish", handlers.PasskeyLoginFinish(state))
+		api.GET("/auth/passkeys", handlers.ListPasskeys(state))
+		api.POST("/auth/passkeys/register/begin", handlers.PasskeyRegisterBegin(state))
+		api.POST("/auth/passkeys/register/finish", handlers.PasskeyRegisterFinish(state))
+		api.DELETE("/auth/passkeys/:id", handlers.DeletePasskey(state))
+		api.POST("/auth/logout", handlers.Logout(state))
 		api.GET("/version/check-update", handlers.CheckUpdate(state))
 		// 在线更新:下载 → 校验 → 替换自己 → 自动重启。gracefulRestart 在下面赋值,
 		// 这里用闭包间接引用,避免"路由要在 server 之前注册、server 又要在路由之后创建"的鸡生蛋

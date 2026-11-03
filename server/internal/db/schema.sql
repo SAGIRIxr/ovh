@@ -209,3 +209,36 @@ CREATE TABLE IF NOT EXISTS app_pairing_codes (
   expires_at TEXT NOT NULL,
   used_at    TEXT
 );
+
+-- ===========================================
+-- passkeys: 网页登录用的通行证(WebAuthn)
+-- credential 是 webauthn.Credential 的 JSON(公钥、签名计数器、标志位),不是机密;
+-- key_fp 是注册时访问密钥的指纹(secret.Fingerprint):换了 API_SECRET_KEY 就全部作废,
+-- 「密钥泄漏 → 换密钥」能把别人偷偷加的通行证一起清掉。
+-- ===========================================
+CREATE TABLE IF NOT EXISTS passkeys (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  credential_id TEXT NOT NULL UNIQUE,
+  name          TEXT NOT NULL,
+  rp_id         TEXT NOT NULL,
+  credential    TEXT NOT NULL,
+  key_fp        TEXT NOT NULL,
+  created_at    TEXT NOT NULL,
+  last_used     TEXT
+);
+
+-- ===========================================
+-- web_sessions: 通行证登录后发的网页会话(令牌只存 SHA-256)
+-- 固定 30 天过期;删掉对应通行证、退出登录、换访问密钥都会让它失效。
+-- ===========================================
+CREATE TABLE IF NOT EXISTS web_sessions (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  token_hash  TEXT NOT NULL UNIQUE,
+  passkey_id  INTEGER NOT NULL,
+  key_fp      TEXT NOT NULL,
+  created_at  TEXT NOT NULL,
+  expires_at  TEXT NOT NULL,
+  last_used   TEXT,
+  ip          TEXT NOT NULL DEFAULT '',
+  user_agent  TEXT NOT NULL DEFAULT ''
+);

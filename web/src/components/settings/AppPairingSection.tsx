@@ -11,6 +11,8 @@ import { fmtDateTime } from "@/i18n/format";
 import { Section } from "@/routes/settings-sections";
 import { useAppDevices, useCreatePairingCode, useRevokeAppDevice } from "@/hooks/use-app-devices";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { getSessionToken } from "@/lib/api";
 
 /** 剩余秒数文案:过期后直接显示"已过期",不显示负数 */
 function useCountdown(expiresAt?: string): { expired: boolean; label: string } {
@@ -41,6 +43,10 @@ export function AppPairingSection() {
   const { expired, label: countdown } = useCountdown(create.data?.expiresAt);
 
   const code = create.data?.code;
+  // 用通行证登录时,后端要求生成配对码前再确认一次访问密钥(配出来的设备令牌是长期有效的)
+  const needKey = !!getSessionToken();
+  const [pairKey, setPairKey] = useState("");
+  const generate = () => create.mutate(needKey ? pairKey.trim() : undefined);
 
   return (
     <Section title={t("settings.sections.app")}>
@@ -68,7 +74,17 @@ export function AppPairingSection() {
           </>
         ) : (
           <div className="flex-1">
-            <Button size="sm" onClick={() => create.mutate()} disabled={create.isPending}>
+            {needKey && (
+              <Input
+                type="password"
+                className="mb-2 max-w-xs"
+                value={pairKey}
+                onChange={(e) => setPairKey(e.target.value)}
+                placeholder={t("settings.app.keyPlaceholder")}
+                autoComplete="off"
+              />
+            )}
+            <Button size="sm" onClick={generate} disabled={create.isPending || (needKey && !pairKey.trim())}>
               <Plus className="w-3.5 h-3.5" />
               {create.isPending ? t("settings.app.generating") : code ? t("settings.app.regenerate") : t("settings.app.generate")}
             </Button>
@@ -79,7 +95,7 @@ export function AppPairingSection() {
         )}
       </div>
       {code && !expired && (
-        <Button size="sm" variant="outline" onClick={() => create.mutate()} disabled={create.isPending}>
+        <Button size="sm" variant="outline" onClick={generate} disabled={create.isPending || (needKey && !pairKey.trim())}>
           {t("settings.app.regenerateSimple")}
         </Button>
       )}

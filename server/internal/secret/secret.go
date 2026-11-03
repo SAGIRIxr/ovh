@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"crypto/aes"
 	"crypto/cipher"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -47,6 +48,8 @@ var (
 	mu     sync.RWMutex
 	aead   cipher.AEAD
 	loaded bool
+	// fpKey 给 Fingerprint 用的 HMAC 密钥,从数据库加密密钥派生
+	fpKey []byte
 	// keyGenerated 本次启动是否新生成了密钥(而不是读到已有的)。
 	// 这个标志有个要命的用途:如果密钥是新生成的,而数据库里已经躺着密文,
 	// 说明原来那把钥匙丢了 —— 那批凭据永远解不开了,必须让用户知道,
@@ -98,8 +101,25 @@ func Init(dataDir, envPath string) error {
 		return fmt.Errorf("初始化加密失败: %w", err)
 	}
 	aead = g
+	fk := sha256.Sum256(append([]byte("ovh-fingerprint|"), key...))
+	fpKey = fk[:]
 	loaded = true
 	return nil
+}
+
+// Fingerprint 给一个机密值算可以落库的指纹(用来判断「它变没变」,而不是存它本身)。
+// 用数据库加密密钥做 HMAC:只拿到数据库文件的人没法拿指纹离线爆破出原值,
+// 弱一点的访问密钥也不会因此泄漏。加密没启用时退化成带前缀的 SHA-256。
+func Fingerprint(v string) string {
+	mu.RLock()
+	defer mu.RUnlock()
+	if !loaded {
+		sum := sha256.Sum256([]byte("ovh-fingerprint|" + v))
+		return "s:" + hex.EncodeToString(sum[:16])
+	}
+	m := hmac.New(sha256.New, fpKey)
+	m.Write([]byte(v))
+	return "h:" + hex.EncodeToString(m.Sum(nil)[:16])
 }
 
 // Enabled 加密是否可用

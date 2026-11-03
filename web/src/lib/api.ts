@@ -41,9 +41,24 @@ export function setApiSecretKey(key: string): void {
   window.localStorage.setItem(API_KEY_STORAGE, key);
 }
 
-/** 清除 API 密钥（登出或鉴权失败时调用） */
+/** 清除 API 密钥（登出或鉴权失败时调用）。通行证会话令牌一起清:两者都是「这个浏览器的登录态」 */
 export function clearApiSecretKey(): void {
   window.localStorage.removeItem(API_KEY_STORAGE);
+  window.localStorage.removeItem(SESSION_STORAGE);
+}
+
+// 通行证登录发的会话令牌。和访问密钥二选一:用通行证登录的浏览器里不存访问密钥,
+// 令牌 30 天过期、服务端可吊销,丢了也不等于丢了主密钥
+const SESSION_STORAGE = "ovh_session_token";
+
+export function getSessionToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return window.localStorage.getItem(SESSION_STORAGE);
+}
+
+export function setSessionToken(token: string): void {
+  window.localStorage.removeItem(API_KEY_STORAGE);
+  window.localStorage.setItem(SESSION_STORAGE, token);
 }
 
 /**
@@ -89,6 +104,9 @@ function createApiClient(): AxiosInstance {
     const key = getApiSecretKey();
     if (key) {
       config.headers.set("X-API-Key", key);
+    } else {
+      const session = getSessionToken();
+      if (session) config.headers.set("Authorization", `Bearer ${session}`);
     }
     // 自动注入当前账户。
     //

@@ -36,9 +36,11 @@ export function useAppDevices() {
 export function useCreatePairingCode() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async () => (await api.post<PairingCodeResp>("/app/pairing-codes")).data,
+    // apiKey:用通行证会话登录时后端要求再确认一次访问密钥
+    mutationFn: async (apiKey?: string) =>
+      (await api.post<PairingCodeResp>("/app/pairing-codes", apiKey ? { apiKey } : {})).data,
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.app.devices() }),
-    onError: () => toast.error(i18n.t("hooksMsg.app.pairingCodeFailed")),
+    onError: (e: any) => toast.error(e?.response?.data?.error || i18n.t("hooksMsg.app.pairingCodeFailed")),
   });
 }
 

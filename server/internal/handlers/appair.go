@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/ovh-buy/server/internal/app"
+	"github.com/ovh-buy/server/internal/auth"
 	"github.com/ovh-buy/server/internal/db"
 )
 
@@ -116,8 +117,30 @@ func (w *ipFailureWindow) fail(ip string) {
 }
 
 // CreatePairingCode POST /api/app/pairing-codes —— 网页端生成二维码内容
+//
+// 用设备令牌 / 通行证会话登录的请求要在请求体里再给一次访问密钥:配对出来的设备令牌
+// 永不过期、换密钥也不失效,不拦的话偷到一个 30 天会话就能换成永久后门,
+// 「添加通行证要输密钥」那道门也被绕开了。用 X-API-Key 登录的本来就证明过密钥,不再问。
 func CreatePairingCode(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		_, viaDevice := c.Get("app_device_id")
+		_, viaSession := c.Get("web_session_id")
+		if viaDevice || viaSession {
+			var body struct {
+				APIKey string `json:"apiKey"`
+			}
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4<<10)
+			_ = c.ShouldBindJSON(&body)
+			ok, wait := auth.VerifyKeyAgain(c.ClientIP(), strings.TrimSpace(body.APIKey), state.APIKey, time.Now())
+			if wait > 0 {
+				c.JSON(http.StatusTooManyRequests, gin.H{"success": false, "error": "访问密钥错误次数过多,请稍后再试"})
+				return
+			}
+			if !ok {
+				c.JSON(http.StatusForbidden, gin.H{"success": false, "error": "生成配对码需要再输一次访问密钥", "code": "NEED_API_KEY"})
+				return
+			}
+		}
 		code, expiresAt, err := state.DB.CreatePairingCode()
 		if err != nil {
 			state.Logger.Error("生成配对码失败: "+err.Error(), "app")

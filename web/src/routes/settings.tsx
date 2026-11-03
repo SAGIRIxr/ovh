@@ -2,6 +2,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { Settings as SettingsIcon, KeyRound, Globe, Send, Database, Save, AlertTriangle, CheckCircle2, Plus, Star, RotateCw, Trash2, Pencil, BellRing, RefreshCw, Radio, Network, Fingerprint, ShieldAlert, Radar, Ban, Activity, Timer, Palette, Sun, Moon, Monitor } from "lucide-react";
 import { useTheme } from "@/hooks/use-theme";
 import { Section } from "@/routes/settings-sections";
+import { PasskeySection } from "@/components/settings/PasskeySection";
 import { AppPairingSection } from "@/components/settings/AppPairingSection";
 import { Smartphone } from "lucide-react";
 import type { ThemeMode } from "@/lib/theme";
@@ -207,6 +208,7 @@ function SettingsPage() {
                     placeholder={t("settings.passwordSection.placeholder")}
                   />
                 </Field>
+                <PasskeySection />
               </Section>
             ) : active === "appearance" ? (
               <AppearanceSection />

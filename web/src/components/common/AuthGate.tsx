@@ -1,9 +1,10 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { KeyRound, Loader2, ShieldAlert } from "lucide-react";
+import { Fingerprint, KeyRound, Loader2, ShieldAlert } from "lucide-react";
 import axios from "axios";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { getApiSecretKey, setApiSecretKey, clearApiSecretKey, onAuthFailure } from "@/lib/api";
+import { getApiSecretKey, setApiSecretKey, clearApiSecretKey, onAuthFailure, getSessionToken, setSessionToken } from "@/lib/api";
+import { getPasskey, isPasskeyCancel, passkeySupported } from "@/lib/passkey";
 import { useTranslation } from "react-i18next";
 import i18n from "@/i18n";
 import { LanguageToggle } from "@/components/layout/LanguageToggle";
@@ -42,11 +43,12 @@ export function AuthGate({ children }: { children: ReactNode }) {
   // 启动时检查一次
   useEffect(() => {
     const stored = getApiSecretKey();
-    if (!stored) {
+    const session = stored ? null : getSessionToken();
+    if (!stored && !session) {
       setState("needs-auth");
       return;
     }
-    verifyKey(stored).then((r) => {
+    verifyHeaders(stored ? { "X-API-Key": stored } : { Authorization: `Bearer ${session}` }).then((r) => {
       if (r.ok) {
         setState("authed");
         return;
@@ -65,7 +67,7 @@ export function AuthGate({ children }: { children: ReactNode }) {
         return;
       }
       clearApiSecretKey();
-      setErrMsg(t("commons.auth.storedKeyInvalid"));
+      setErrMsg(t(stored ? "commons.auth.storedKeyInvalid" : "commons.auth.sessionInvalid"));
       setState("needs-auth");
     });
   }, []);
@@ -82,8 +84,9 @@ export function AuthGate({ children }: { children: ReactNode }) {
     return (
       <LoginOverlay
         initialError={errMsg}
-        onSuccess={(key) => {
-          setApiSecretKey(key);
+        onSuccess={(cred) => {
+          if (cred.key) setApiSecretKey(cred.key);
+          else if (cred.token) setSessionToken(cred.token);
           setErrMsg("");
           setState("authed");
         }}
@@ -100,7 +103,7 @@ function LoginOverlay({
   onSuccess,
 }: {
   initialError?: string;
-  onSuccess: (key: string) => void;
+  onSuccess: (cred: { key?: string; token?: string }) => void;
 }) {
   const [key, setKey] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -126,7 +129,7 @@ function LoginOverlay({
     try {
       const r = await verifyKey(trimmed);
       if (r.ok) {
-        onSuccess(trimmed);
+        onSuccess({ key: trimmed });
       } else {
         setError(r.message);
         // 被限流时把按钮也锁住:不锁的话用户会一直点,而每次点都在续限流窗口
@@ -136,6 +139,29 @@ function LoginOverlay({
       setError(e?.message || t("commons.auth.verifyFailed"));
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // 通行证登录:后端发挑战 → 系统弹窗(指纹 / PIN / Windows Hello)→ 后端验签发会话令牌
+  const [passkeyBusy, setPasskeyBusy] = useState(false);
+  const loginWithPasskey = async () => {
+    setPasskeyBusy(true);
+    setError("");
+    try {
+      const begin = await axios.post("/api/auth/passkey/login/begin", {}, { validateStatus: () => true, timeout: 15000 });
+      if (begin.status !== 200) throw new Error(begin.data?.error || t("commons.auth.unexpectedStatus", { status: begin.status }));
+      const credential = await getPasskey(begin.data.options);
+      const fin = await axios.post(
+        "/api/auth/passkey/login/finish",
+        { flowId: begin.data.flowId, credential },
+        { validateStatus: () => true, timeout: 15000 }
+      );
+      if (fin.status !== 200 || !fin.data?.token) throw new Error(fin.data?.error || t("commons.auth.unexpectedStatus", { status: fin.status }));
+      onSuccess({ token: fin.data.token });
+    } catch (e: any) {
+      if (!isPasskeyCancel(e)) setError(e?.message || t("commons.auth.verifyFailed"));
+    } finally {
+      setPasskeyBusy(false);
     }
   };
 
@@ -195,6 +221,13 @@ function LoginOverlay({
           )}
         </Button>
 
+        {passkeySupported() && (
+          <Button variant="outline" onClick={() => void loginWithPasskey()} disabled={passkeyBusy || submitting} className="w-full">
+            {passkeyBusy ? <Loader2 className="w-4 h-4 animate-spin mr-1.5" /> : <Fingerprint className="w-4 h-4 mr-1.5" />}
+            {t("commons.auth.passkeyLogin")}
+          </Button>
+        )}
+
         <p className="text-[10px] text-muted-foreground leading-relaxed">
           {t("commons.auth.storageNote")}
         </p>
@@ -222,10 +255,14 @@ type VerifyResult =
   | { ok: false; reason: "bad-key" | "rate-limited" | "unreachable"; message: string; retryAfter?: number };
 
 async function verifyKey(key: string): Promise<VerifyResult> {
+  return verifyHeaders({ "X-API-Key": key });
+}
+
+async function verifyHeaders(headers: Record<string, string>): Promise<VerifyResult> {
   let res;
   try {
     res = await axios.get("/api/stats", {
-      headers: { "X-API-Key": key },
+      headers,
       timeout: 10000,
       // 别让 axios 把 401/429 当成 reject，自己判 status
       validateStatus: () => true,

@@ -19,16 +19,20 @@ type Config struct {
 	// DeviceTokenValid App 设备令牌校验(配对体系,见 internal/db/appdevices.go)。
 	// 依赖注入而不是直接 import db:这个包要保持无状态可测。
 	DeviceTokenValid func(token string) (int64, bool)
+	// WebSessionValid 通行证登录发的网页会话令牌(同样走 Bearer)。nil = 不支持
+	WebSessionValid func(token string) (int64, bool)
 }
 
 // DefaultWhitelist 不需要 X-API-Key 即可访问的路径
 func DefaultWhitelist() map[string]struct{} {
 	return map[string]struct{}{
-		"/health":                     {},
-		"/api/health":                 {},
-		"/api/version":                {}, // 前端启动时拉版本号,登录前可见
-		"/api/version/check-update":   {}, // 更新检查也免鉴权,登录前可提示
-		"/api/app/pair":               {}, // App 配对兑换:凭 2 分钟一次性码,不需要密钥
+		"/health":                        {},
+		"/api/health":                    {},
+		"/api/version":                   {}, // 前端启动时拉版本号,登录前可见
+		"/api/version/check-update":      {}, // 更新检查也免鉴权,登录前可提示
+		"/api/app/pair":                  {}, // App 配对兑换:凭 2 分钟一次性码,不需要密钥
+		"/api/auth/passkey/login/begin":  {}, // 通行证登录:自带限流,见 handlers/passkey.go
+		"/api/auth/passkey/login/finish": {},
 	}
 }
 
@@ -93,10 +97,18 @@ func Middleware(cfg Config) gin.HandlerFunc {
 						return
 					}
 				}
+				if token != "" && cfg.WebSessionValid != nil {
+					if id, ok := cfg.WebSessionValid(token); ok {
+						c.Set("web_session_id", id)
+						clearAuthFailures(c.ClientIP())
+						c.Next()
+						return
+					}
+				}
 				recordAuthFailure(c.ClientIP(), time.Now())
 				c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{
 					"error":   "Invalid device token",
-					"message": "设备令牌无效或已被吊销。请到网页控制台重新配对(设置 → App 管理)",
+					"message": "设备令牌或通行证登录已失效(被吊销、过期,或更换过访问密钥)。App 请重新配对,网页请重新登录",
 					"code":    "INVALID_DEVICE_TOKEN",
 				})
 				return
