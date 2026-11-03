@@ -24,16 +24,20 @@ func TestPurchaseHonorsExplicitFQN(t *testing.T) {
 	original := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = original })
 	for _, tc := range []struct {
-		name, fqn  string
-		options    []string
-		expectCart bool
+		name, fqn   string
+		options     []string
+		expectCart  bool
+		expectFatal bool
 	}{
-		{"other combo in stock", "27skleb01-v1.ram-64g-ecc-2400.softraid-2x450nvme", nil, false},
-		{"exact combo in stock", "27skleb01-v1.ram-32g-ecc-2400.softraid-2x450nvme", nil, true},
-		{"case insensitive", "27SKLEB01-v1.RAM-32g-ecc-2400.softraid-2x450nvme", nil, true},
+		{"other combo in stock", "27skleb01-v1.ram-64g-ecc-2400.softraid-2x450nvme", nil, false, false},
+		{"exact combo in stock", "27skleb01-v1.ram-32g-ecc-2400.softraid-2x450nvme", nil, true, false},
+		{"case insensitive", "27SKLEB01-v1.RAM-32g-ecc-2400.softraid-2x450nvme", nil, true, false},
 		{"with full option codes", "27skleb01-v1.ram-32g-ecc-2400.softraid-2x450nvme",
-			[]string{"bandwidth-500-27skle", "ram-32g-ecc-2400-27skleb01-v1", "softraid-2x450nvme-27skleb01-v1"}, true},
-		{"no fqn keeps old behaviour", "", nil, true},
+			[]string{"bandwidth-500-27skle", "ram-32g-ecc-2400-27skleb01-v1", "softraid-2x450nvme-27skleb01-v1"}, true, false},
+		{"no fqn keeps old behaviour", "", nil, true, false},
+		// 锁定的 32G 组合在库存里,所填配置却是 64G:永远凑不齐,直接判死
+		{"options contradict fqn", "27skleb01-v1.ram-32g-ecc-2400.softraid-2x450nvme",
+			[]string{"ram-64g-ecc-2400-27skleb01-v1"}, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -75,6 +79,12 @@ func TestPurchaseHonorsExplicitFQN(t *testing.T) {
 			// 不能拿有货的另一套组合去下单
 			if tc.expectCart && (carts != 1 || outcome.WaitingForStock) {
 				t.Fatalf("expected to order the in-stock combo: %+v carts=%d", outcome, carts)
+			}
+			if tc.expectFatal {
+				if !outcome.Fatal || carts != 0 {
+					t.Fatalf("contradicting options must stop the task: %+v carts=%d", outcome, carts)
+				}
+				return
 			}
 			if !tc.expectCart && (!outcome.WaitingForStock || outcome.Fatal || outcome.Attempted) {
 				t.Fatalf("other combo in stock must be treated as unavailable: %+v carts=%d", outcome, carts)

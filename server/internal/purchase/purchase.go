@@ -213,6 +213,16 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 			}
 		}
 		if len(exact) == 0 {
+			// 锁定的组合明明在库存数据里,却被所填配置筛掉了:两边不是同一套硬件,
+			// 这个任务永远等不到货。判死并说清楚,不让它在后台按「无货」空转
+			for _, av := range availabilities {
+				if fqn, _ := av["fqn"].(string); strings.EqualFold(fqn, item.FQN) {
+					msg := fmt.Sprintf("所填配置 %v 和锁定的 FQN %s 不是同一套硬件，永远等不到货，任务已停止", wantedHW, item.FQN)
+					state.Logger.Error(msg, "purchase")
+					recordFailure(state, item, msg)
+					return Outcome{Fatal: true, Reason: msg}
+				}
+			}
 			state.Logger.Info(fmt.Sprintf("服务器 %s 库存里暂无指定组合 %s，视为无货", item.PlanCode, item.FQN), "purchase")
 			recordTiming(timingKey, tl, "unavailable")
 			return Outcome{}

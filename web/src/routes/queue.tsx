@@ -56,7 +56,7 @@ import { TimingChip } from "@/components/common/TimingChip";
 import { AccountChip } from "@/components/common/AccountChip";
 import { PlanCodeCombobox } from "@/components/common/PlanCodeCombobox";
 import { OptionGroupSection } from "@/components/common/OptionGroupSection";
-import { ManualConfigSection, fqnHardware, type ManualConfig } from "@/components/common/ManualConfigSection";
+import { ManualConfigSection, fqnHardware, fqnOptionConflicts, type ManualConfig } from "@/components/common/ManualConfigSection";
 import { describeOptionCodes, groupOptions, type OptionGroupKey } from "@/lib/option-groups";
 import { splitList } from "@/lib/split-list";
 import { mergeStockPlans } from "@/lib/stock-plans";
@@ -646,6 +646,11 @@ function CreateQueueDialog({
   const manualActive = manualOpen || !matchedServer;
   const effectiveFqn = manualActive ? manualFqn.trim() : "";
   const fqnMismatch = effectiveFqn !== "" && !effectiveFqn.toLowerCase().startsWith(planCode.trim().toLowerCase() + ".");
+  // 选项过滤和 FQN 过滤是「且」:两边不是同一套配置时任务永远等不到货
+  const fqnCheck = effectiveFqn ? fqnOptionConflicts(effectiveFqn, parsedOptions, planVariants) : null;
+  const fqnConflicts = fqnCheck?.conflicts || [];
+  // 有库存数据、确定冲突时才拦提交;只是猜的话给提示,不挡人
+  const fqnBlocked = !!fqnCheck?.certain && fqnConflicts.length > 0;
   const prereleaseMismatch = !!matchedServer?.prerelease && parsedOptions.length > 0 &&
     !!variants && !variants.some((v) => variantCoversAll(v, parsedOptions));
   const optionHasStock = (groupKey: OptionGroupKey, value: string): boolean => {
@@ -666,7 +671,7 @@ function CreateQueueDialog({
   const orderPlan = clampOrderPlan(datacenters.length, Number(quantity) || 1);
   const qty = orderPlan.quantity;
   const totalTasks = orderPlan.total;
-  const canSubmit = !!activeAcc && planCode.trim().length > 0 && datacenters.length > 0 && qty > 0 && !prereleaseMismatch && !fqnMismatch;
+  const canSubmit = !!activeAcc && planCode.trim().length > 0 && datacenters.length > 0 && qty > 0 && !prereleaseMismatch && !fqnMismatch && !fqnBlocked;
 
   const reset = () => {
     setPlanCode("");
@@ -1074,6 +1079,11 @@ function CreateQueueDialog({
                   </Chip>
                 ))}
               </div>
+            )}
+            {fqnConflicts.length > 0 && (
+              <p className={"text-xs mt-2 " + (fqnBlocked ? "text-destructive" : "text-warning")} role="alert">
+                {t(fqnBlocked ? "queue.manual.fqnConflict" : "queue.manual.fqnConflictMaybe", { options: fqnConflicts.join(", ") })}
+              </p>
             )}
             {prereleaseMismatch && (
               <p className="text-xs text-destructive mt-2" role="alert">{t("queue.preorderConfigMismatch")}</p>

@@ -205,6 +205,8 @@ export const snipePagesEn = {
       fqnHint: "Pins the whole hardware combination: orders only when this FQN is in stock and keeps waiting if only other combinations are. Without OPTIONS, memory and disk are picked from the FQN.",
       fqnMismatch: "The FQN must start with \"{{code}}.\" or it will be rejected.",
       fqnRowTitle: "Orders only when this combination is in stock\n{{fqn}}",
+      fqnConflict: "Options {{options}} are not part of this FQN, so the task could never find stock. Remove them or pick another FQN.",
+      fqnConflictMaybe: "Options {{options}} do not look like part of this FQN. If they really differ the task will never find stock; double-check before submitting.",
     },
     extraOptionsPlaceholder: "Addon planCodes, comma-separated. Example: ram-64g-ecc-2400, softraid-2x450nvme-24sk50",
     optionsSelected: "Selected:",

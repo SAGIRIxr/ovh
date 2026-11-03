@@ -205,6 +205,8 @@ export const snipePagesZh = {
       fqnHint: "锁定整套硬件组合：只在这条 FQN 有货时下单，其它组合有货也继续等。没填 OPTIONS 时按 FQN 里的内存、硬盘段自动选配置。",
       fqnMismatch: "FQN 要以「{{code}}.」开头，否则提交会被拒绝。",
       fqnRowTitle: "只在这套组合有货时下单\n{{fqn}}",
+      fqnConflict: "配置 {{options}} 和 FQN 不是同一套硬件，这样的任务永远等不到货。去掉这几项，或换一条 FQN。",
+      fqnConflictMaybe: "配置 {{options}} 看起来和 FQN 不是同一套硬件。如果确实对不上，任务会一直等不到货，提交前再核对一下。",
     },
     extraOptionsPlaceholder: "addon planCode,逗号分隔。例如:ram-64g-ecc-2400, softraid-2x450nvme-24sk50",
     optionsSelected: "已选:",

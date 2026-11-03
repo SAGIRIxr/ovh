@@ -40,6 +40,38 @@ export function parseManualConfig(text: string): ManualConfig {
   return out;
 }
 
+/** 和 FQN 不是同一套配置的选项。两者冲突的任务永远等不到货(选项过滤和 FQN 过滤是「且」)。
+ *  - 有这个型号的库存数据(variants)时,口径和后端下单一致:选项能匹配上库存里某条 FQN 的段
+ *    (参与库存判定),却匹配不上锁定的这条 → 确定冲突(certain),后端也会判死。
+ *  - 没有库存数据时只能猜:锁定的 FQN 里有同类段(第一个 "-" 前的前缀相同,如 ram / softraid)
+ *    却一段都没对上。老式 addon 命名也可能落到这里,所以只提示、不拦提交。 */
+export function fqnOptionConflicts(
+  fqn: string,
+  options: string[],
+  variants?: AvailabilityItem[]
+): { conflicts: string[]; certain: boolean } {
+  const segsOf = (f: string) => f.toLowerCase().split(".").slice(1);
+  const pinned = segsOf(fqn);
+  if (pinned.length === 0) return { conflicts: [], certain: false };
+  const matches = (seg: string, opt: string) => seg === opt || opt.startsWith(seg + "-") || seg.startsWith(opt + "-");
+  const opts = options.map((o) => o.trim().toLowerCase()).filter(Boolean);
+  if (variants && variants.length > 0) {
+    const all = variants.flatMap((v) => segsOf(v.fqn));
+    return {
+      conflicts: opts.filter((o) => all.some((s) => matches(s, o)) && !pinned.some((s) => matches(s, o))),
+      certain: true,
+    };
+  }
+  const family = (s: string) => s.split("-")[0];
+  return {
+    conflicts: opts.filter((o) => {
+      const same = pinned.filter((s) => family(s) === family(o));
+      return same.length > 0 && !same.some((s) => matches(s, o));
+    }),
+    certain: false,
+  };
+}
+
 /** FQN 去掉第一段 planCode 后的硬件段,按钮和队列行上显示用 */
 export function fqnHardware(fqn: string): string {
   return fqn.split(".").slice(1).join(" · ");
