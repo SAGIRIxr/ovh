@@ -381,6 +381,7 @@ OVH 凭据**不放 env**,通过前端 OvhCredsGate / 设置页"OVH 账户" tab �
 
 - 后端所有 `/api/*`(除少数白名单如 `/health` / `/version` / `/version/check-update`)都要求 `X-API-Key` 请求头
 - 两层全屏 gate:AuthGate(API 密钥) + OvhCredsGate(至少一个 OVH 账户)
+- **通行证(Passkey)登录**:设置 → 访问密码里添加,可以关闭访问密钥登录。说明和找回方法见 [docs/passkey.md](docs/passkey.md)
 - API Key 存浏览器 localStorage,失效自动清除并要求重新输入
 - OVH 凭据落 SQLite `ovh_accounts` 表,前端通过 OvhCredsGate / 设置页"OVH 账户" tab 录入
 - `.gitignore` 默认拒绝所有 `.env` 文件入库(只允许 `*.env.example`),同时挡掉 `*.db` / `data/` / `logs/`
