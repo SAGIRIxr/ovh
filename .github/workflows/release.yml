@@ -61,7 +61,10 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: server/go.mod
+          # 固定成和 Dockerfile 一样的版本。以前按 go.mod 的 `go 1.26.0` 装,
+          # Release 二进制带着 1.26.1~1.26.10 修掉的 33 个标准库漏洞(net/http、crypto/tls…)。
+          # 升级时两处一起改
+          go-version: "1.27.3"
           cache-dependency-path: server/go.sum
 
       - name: 交叉编译二进制

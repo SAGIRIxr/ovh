@@ -1,3 +1,4 @@
+import { safeHref } from "@/lib/safe-url";
 import { createFileRoute } from "@tanstack/react-router";
 import { Clock, RefreshCw, Trash2, Search, ExternalLink, AlertCircle, Hourglass } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
@@ -321,7 +322,7 @@ function HistoryRow({ item, now }: { item: PurchaseHistory; now: number }) {
       <td className="px-4 py-3">
         {item.status === "success" && item.orderUrl ? (
           <a
-            href={item.orderUrl}
+            href={safeHref(item.orderUrl)}
             target="_blank"
             rel="noopener noreferrer"
             aria-disabled={isExpired}
@@ -392,7 +393,7 @@ function HistoryCard({ item, now }: { item: PurchaseHistory; now: number }) {
           ) : <span />}
           {item.status === "success" && item.orderUrl ? (
             <a
-              href={item.orderUrl}
+              href={safeHref(item.orderUrl)}
               target="_blank"
               rel="noopener noreferrer"
               className={`inline-flex items-center gap-1 text-foreground hover:underline text-[12px] ${isExpired ? "pointer-events-none opacity-50" : ""}`}

@@ -1,3 +1,4 @@
+import { safeHref } from "@/lib/safe-url";
 import { useRef, useState } from "react";
 import { AlertTriangle, Undo2, Loader2 } from "lucide-react";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -55,7 +56,7 @@ function RetractionSession({ serviceName, displayName, info, onOpenChange, accou
             <p className="font-medium">{t("maint.retraction.order", { id: info.orderId })}</p>
             {info.retractionDate && <p className="mt-1 text-xs text-muted-foreground">{t("maint.retraction.deadline", { date: fmtDateTime(info.retractionDate) })}</p>}
             {info.orderDate && <p className="mt-1 text-xs text-muted-foreground">{t("maint.retraction.deadlineNote", { date: fmtDate(info.orderDate) })}</p>}
-            {info.orderUrl && <a href={info.orderUrl} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-xs underline underline-offset-4">{t("maint.retraction.viewOrder")}</a>}
+            {info.orderUrl && <a href={safeHref(info.orderUrl)} target="_blank" rel="noopener noreferrer" className="mt-2 inline-block text-xs underline underline-offset-4">{t("maint.retraction.viewOrder")}</a>}
           </div>
           <p>{t("maint.retraction.refund")}</p>
           <p className="font-medium">{t("maint.retraction.scope")}</p>

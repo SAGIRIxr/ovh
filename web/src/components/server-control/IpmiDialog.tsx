@@ -1,3 +1,4 @@
+import { safeHref } from "@/lib/safe-url";
 import { useEffect, useRef, useState } from "react";
 import { Monitor, Loader2, ExternalLink, Download } from "lucide-react";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
@@ -201,7 +202,7 @@ export function IpmiDialog({
               <p className="text-[13px] text-success font-semibold text-center">{t("ctrl.ipmi.ready")}</p>
               {result.url ? (
                 <a
-                  href={result.url}
+                  href={safeHref(result.url)}
                   target="_blank"
                   rel="noreferrer"
                   className="flex items-center justify-center gap-2 w-full px-4 py-3 border border-border rounded-2xl hover:bg-secondary/50 transition-colors text-[13px] font-semibold"

@@ -1,3 +1,4 @@
+import { safeHref } from "@/lib/safe-url";
 import { useEffect, useRef, useState } from "react";
 import { Sparkles, Loader2, Download, CheckCircle2, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -158,7 +159,7 @@ export function UpdateButton({ check }: { check?: UpdateCheck }) {
   return (
     <span className="inline-flex items-center gap-1.5">
       <a
-        href={check!.url}
+        href={safeHref(check!.url)}
         target="_blank"
         rel="noreferrer noopener"
         className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-primary/10 text-primary hover:bg-primary/20 transition-colors"

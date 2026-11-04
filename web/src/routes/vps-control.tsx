@@ -1,3 +1,4 @@
+import { openSafe } from "@/lib/safe-url";
 import { createFileRoute } from "@tanstack/react-router";
 import { useTranslation, Trans } from "react-i18next";
 import { terminationLabel } from "@/hooks/use-server-control";
@@ -383,7 +384,7 @@ function VpsDetail({
     try {
       const url = await console_.mutateAsync();
       if (url) {
-        window.open(url, "_blank", "noopener,noreferrer");
+        openSafe(url);
         toast.success(t("vpsList.toast.consoleOk"));
       } else {
         toast.error(t("vpsList.toast.consoleFail"));

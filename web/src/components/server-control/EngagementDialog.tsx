@@ -1,3 +1,4 @@
+import { openSafe } from "@/lib/safe-url";
 import { useState } from "react";
 import { CalendarRange, Check, AlertCircle, X, FileClock, ExternalLink } from "lucide-react";
 import {
@@ -97,7 +98,7 @@ export function EngagementDialog({
       if (orderUrl) {
         toast.success(t("maint.engagement.toast.orderCreated"));
         // 在新标签打开,不影响当前页面
-        window.open(orderUrl, "_blank", "noopener,noreferrer");
+        openSafe(orderUrl);
       } else {
         toast.success(t("maint.engagement.toast.requestSubmitted"));
       }
@@ -229,7 +230,7 @@ export function EngagementDialog({
                       <Button
                         size="sm"
                         variant="default"
-                        onClick={() => window.open(ongoing.data!.order!.url, "_blank", "noopener,noreferrer")}
+                        onClick={() => openSafe(ongoing.data!.order!.url)}
                       >
                         <ExternalLink className="w-3.5 h-3.5 mr-1" />
                         {t("maint.engagement.payBtn")}

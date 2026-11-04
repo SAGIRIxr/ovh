@@ -227,6 +227,7 @@ func main() {
 		})
 	}
 	r.Use(gin.Recovery())
+	r.Use(securityHeaders())
 	// CORS 只放行同机来源。
 	//
 	// 以前是 AllowAllOrigins:true,配上「API_SECRET_KEY 未设时默认 123456」和
@@ -922,10 +923,12 @@ func mountEmbeddedUI(r *gin.Engine) {
 		return
 	}
 	fileServer := http.FileServer(http.FS(distFS))
+	csp := buildCSP(indexHTML)
 
 	serveIndex := func(c *gin.Context) {
 		c.Header("Content-Type", "text/html; charset=utf-8")
 		c.Header("Cache-Control", "no-cache")
+		c.Header("Content-Security-Policy", csp)
 		c.Status(http.StatusOK)
 		_, _ = c.Writer.Write(indexHTML)
 	}

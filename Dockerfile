@@ -27,6 +27,7 @@ COPY web/ ./
 RUN npm run build
 
 # ---- 3. 构建后端 ----
+# Go 版本要和 .github/workflows/release.yml 的 setup-go 保持一致
 FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS gobuild
 WORKDIR /app/server
 # 依赖单独一层：go.mod/go.sum 没变就命中缓存

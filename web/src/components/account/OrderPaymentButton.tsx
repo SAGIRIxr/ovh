@@ -1,3 +1,4 @@
+import { safeHref } from "@/lib/safe-url";
 import { useState } from "react";
 import { fmtMoney } from "@/i18n/format";
 import { useTranslation } from "react-i18next";
@@ -233,7 +234,7 @@ export function OrderPaymentButton({
           )}
           {managerUrl && (
             <a
-              href={managerUrl}
+              href={safeHref(managerUrl)}
               target="_blank"
               rel="noopener noreferrer"
               className="text-sm underline underline-offset-4"
