@@ -3,6 +3,7 @@ import { Settings as SettingsIcon, KeyRound, Globe, Send, Database, Save, AlertT
 import { useTheme } from "@/hooks/use-theme";
 import { Section } from "@/routes/settings-sections";
 import { PasskeySection } from "@/components/settings/PasskeySection";
+import { useAppDevices } from "@/hooks/use-app-devices";
 import { AppPairingSection } from "@/components/settings/AppPairingSection";
 import { Smartphone } from "lucide-react";
 import type { ThemeMode } from "@/lib/theme";
@@ -90,6 +91,9 @@ function SettingsPage() {
   const { t } = useTranslation();
   const cfg = useSettings();
   const save = useSaveSettings();
+  // 「App 配对」是给配套手机 App 用的,而那个 App 没公开发布 —— 只在已经配对过设备时露出来(好让人能吊销)
+  const appDevices = useAppDevices();
+  const hasPairedDevices = (appDevices.data?.length ?? 0) > 0;
   const [active, setActive] = useState<typeof SECTIONS[number]["id"]>("password");
   const [form, setForm] = useState<SettingsConfig>({});
   const [apiKey, setApiKey] = useState("");
@@ -158,7 +162,7 @@ function SettingsPage() {
               否则它只盖到栅格格子的边界,真正被裁断的那几像素还是硬切 */}
           <div className="pointer-events-none absolute -right-3 top-0 bottom-0 w-10 bg-gradient-to-l from-background via-background/80 to-transparent lg:hidden z-10" />
         <nav className="lg:space-y-1 flex lg:flex-col overflow-x-auto lg:overflow-visible gap-1 lg:gap-0 -mx-3 px-3 lg:mx-0 lg:px-0 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
-          {SECTIONS.map((s) => {
+          {SECTIONS.filter((s) => s.id !== "app" || hasPairedDevices).map((s) => {
             const Icon = s.icon;
             const a = active === s.id;
             return (

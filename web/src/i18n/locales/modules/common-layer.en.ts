@@ -225,7 +225,7 @@ const pack: CommonLayerPack = {
       storedKeyInvalid: "The saved API key is no longer valid; please re-enter it",
       sessionInvalid: "Your passkey session expired or was logged out; please sign in again",
       passkeyLogin: "Sign in with a passkey",
-      keyLoginDisabled: "Access-key sign-in is disabled; please use a passkey. If no passkey works, an administrator can create an allow-key-login file in the server data directory to restore it temporarily.",
+      keyLoginDisabled: "Access-key sign-in is disabled; please use a passkey.",
       emptyKey: "Please enter the API key",
       verifyFailed: "Verification failed; check the network or the backend service",
       title: "API key required",

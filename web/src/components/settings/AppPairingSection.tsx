@@ -51,7 +51,7 @@ export function AppPairingSection() {
   return (
     <Section title={t("settings.sections.app")}>
       <p className="text-[11px] text-muted-foreground leading-relaxed">
-        {t("settings.app.introPre")}<b>{t("settings.app.introBold")}</b>{t("settings.app.introPost")}
+        {t("settings.app.introPre")}
       </p>
 
       {/* 生成区:码 + 二维码并排;过期后提示重新生成而不是静默留着死码 */}

@@ -215,7 +215,7 @@ export const commonLayerZh = {
       storedKeyInvalid: "已保存的 API 密钥失效，请重新输入",
       sessionInvalid: "通行证登录已过期或被退出，请重新登录",
       passkeyLogin: "使用通行证登录",
-      keyLoginDisabled: "访问密钥登录已被关闭，请使用通行证登录。通行证都用不了时，管理员可以在服务器的数据目录里放一个 allow-key-login 文件临时恢复。",
+      keyLoginDisabled: "访问密钥登录已关闭，请用通行证登录。",
       emptyKey: "请输入 API 密钥",
       verifyFailed: "验证失败，请检查网络或后端服务",
       title: "需要 API 密钥",

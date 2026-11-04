@@ -28,6 +28,8 @@ interface PasskeyRow {
 }
 
 const QK = ["auth", "passkeys"];
+// 详细说明、找回方法(应急文件)、密码管理器提示都在这份文档里,界面上只放一句话
+export const PASSKEY_DOC = "https://github.com/SAGIRIxr/ovh/blob/main/docs/passkey.md";
 
 export function PasskeySection() {
   const { t } = useTranslation();
@@ -100,8 +102,10 @@ export function PasskeySection() {
       <div className="flex items-center gap-2">
         <Fingerprint className="w-4 h-4 text-muted-foreground" />
         <h3 className="text-[14px] font-semibold">{t("settings.passkey.title")}</h3>
+        <a href={PASSKEY_DOC} target="_blank" rel="noreferrer" className="ml-auto text-[11px] text-muted-foreground underline underline-offset-2 hover:text-foreground">
+          {t("settings.passkey.docLink")}
+        </a>
       </div>
-      <p className="text-[11px] text-muted-foreground leading-relaxed">{t("settings.passkey.intro")}</p>
 
       {!supported ? (
         <p className="text-[12px] text-warning">{t("settings.passkey.unsupported")}</p>
@@ -117,7 +121,6 @@ export function PasskeySection() {
             placeholder={t("settings.passkey.keyPlaceholder")}
             autoComplete="off"
           />
-          <p className="text-[11px] text-muted-foreground">{t("settings.passkey.keyHint")}</p>
           <div className="flex gap-2">
             <Button size="sm" onClick={() => register.mutate()} disabled={register.isPending || !apiKey.trim()}>
               {register.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Fingerprint className="w-3.5 h-3.5" />}
@@ -180,18 +183,18 @@ export function PasskeySection() {
               checked={keyLogin.data.disabled}
               disabled={setKeyLogin.isPending || (!keyLogin.data.disabled && !keyLogin.data.viaPasskey)}
               onCheckedChange={(v) => {
-                if (v && !window.confirm(t("settings.passkey.disableConfirm", { path: keyLogin.data!.emergencyPath }))) return;
+                if (v && !window.confirm(t("settings.passkey.disableConfirm"))) return;
                 setKeyLogin.mutate(v);
               }}
             />
           </label>
-          <p className="text-[11px] text-muted-foreground leading-relaxed">
+          <p className="text-[11px] text-muted-foreground">
             {!keyLogin.data.disabled && !keyLogin.data.viaPasskey
               ? t("settings.passkey.disableNeedsPasskey")
-              : t("settings.passkey.disableHint", { path: keyLogin.data.emergencyPath })}
+              : t("settings.passkey.disableHint")}
           </p>
           {keyLogin.data.disabled && keyLogin.data.emergencyFile && (
-            <p className="text-[11px] text-warning">{t("settings.passkey.emergencyActive", { path: keyLogin.data.emergencyPath })}</p>
+            <p className="text-[11px] text-warning">{t("settings.passkey.emergencyActive")}</p>
           )}
         </div>
       )}
