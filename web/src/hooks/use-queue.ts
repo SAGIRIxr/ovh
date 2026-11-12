@@ -17,6 +17,8 @@ export interface QueueItem {
   orderId?: string;
   datacenter: string;
   /** 下单成功后用 OVH 默认支付方式自动付款(显式开关,默认关) */
+  autoPay?: boolean;
+  couponFallback?: boolean;
   coupon?: string;
   duration?: string;
   preorder?: boolean;
@@ -105,6 +107,8 @@ export function useCreateQueueItem() {
       options?: string[];
       retryInterval?: number;
       quantity?: number;
+      autoPay?: boolean;
+  couponFallback?: boolean;
       coupon?: string;
       duration?: string;
       preorder?: boolean;
@@ -138,6 +142,7 @@ export function useCreateQueueItem() {
         retryInterval: payload.retryInterval, options: payload.options || [],
         preorder: payload.preorder ?? false,
         preorderWaitStock: (payload.preorder ?? false) && (payload.preorderWaitStock ?? false),
+        autoPay: payload.autoPay ?? false, couponFallback: !!payload.autoPay && !!payload.couponFallback,
         coupon: payload.coupon?.trim() || undefined, duration: payload.duration || "P1M",
         force: payload.force ?? false, fqn: payload.fqn?.trim() || undefined,
       });
@@ -161,7 +166,7 @@ export function useCreateQueueItem() {
 export function useUpdateQueueItem() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ id, ...patch }: { id: string; datacenter: string; options: string[]; retryInterval: number; coupon: string; duration: string }) =>
+    mutationFn: async ({ id, ...patch }: { id: string; datacenter: string; options: string[]; retryInterval: number; autoPay: boolean; couponFallback: boolean; coupon: string; duration: string }) =>
       (await api.put(`/queue/${encodeURIComponent(id)}`, patch)).data,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.queue.list() });
@@ -230,6 +235,7 @@ export function useClearQueue() {
 
 /**
  * 把已有任务原样复制到别的账户:型号、机房、配置、FQN、重试间隔、优惠码、强制入队都照搬。
+ * keepAutoPay=false 时复制出来的一律不自动付款 —— 换了账户就换了钱包,得用户自己点头。
  * 目标账户已有同机房同配置的任务(没结束的)就跳过,免得一台机器排两条队、抢到两单。
  */
 export function useCopyQueueItems() {
@@ -238,6 +244,7 @@ export function useCopyQueueItems() {
     mutationFn: async (payload: {
       items: QueueItem[];
       accountIds: string[];
+      keepAutoPay: boolean;
       /** 判重用的现有队列 */
       existing: QueueItem[];
     }) => {
@@ -263,9 +270,11 @@ export function useCopyQueueItems() {
               datacenter: it.datacenter,
               retryInterval: it.retryInterval,
               options: it.options || [],
+              autoPay: payload.keepAutoPay && !!it.autoPay,
               preorder: !!it.preorder,
               force: !!it.force,
               coupon: it.coupon || undefined,
+              couponFallback: payload.keepAutoPay && !!it.autoPay && !!it.couponFallback,
               fqn: it.fqn || undefined,
               duration: it.duration || undefined,
             });

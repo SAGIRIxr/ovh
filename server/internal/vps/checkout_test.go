@@ -26,11 +26,13 @@ func TestVPSCheckoutUncertaintyAndCancellation(t *testing.T) {
 	t.Cleanup(func() { http.DefaultTransport = original })
 	for _, tc := range []struct {
 		name                                         string
+		autoPay                                      bool
 		duration                                     string
 		status                                       int
 		response                                     string
 		cancel, invalidOS, annualOnly, deleteAccount bool
 	}{
+		{name: "success", autoPay: true, status: 200, response: `{"orderId":123,"url":"https://orders.invalid/123"}`},
 		{name: "gateway error", status: 504, response: `{"message":"timeout"}`},
 		{name: "missing order ID", status: 200, response: `{}`},
 		{name: "business rejection", status: 400, response: `{"message":"out of stock"}`},
@@ -44,7 +46,7 @@ func TestVPSCheckoutUncertaintyAndCancellation(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			state := lifecycleState(t)
 			state.Accounts = []types.OVHAccount{{ID: "eu", Endpoint: "ovh-eu", Zone: "IE", AppKey: "test", AppSecret: "test", ConsumerKey: "test"}}
-			sub := types.VPSSubscription{Duration: tc.duration, ID: "checkout", PlanCode: "vps-model", OvhSubsidiary: "IE", AutoOrder: true, AutoOrderAccountID: "eu", Quantity: 1}
+			sub := types.VPSSubscription{AutoPay: tc.autoPay, Duration: tc.duration, ID: "checkout", PlanCode: "vps-model", OvhSubsidiary: "IE", AutoOrder: true, AutoOrderAccountID: "eu", Quantity: 1}
 			if tc.invalidOS {
 				sub.OS = "Windows unknown"
 			}
@@ -103,6 +105,13 @@ func TestVPSCheckoutUncertaintyAndCancellation(t *testing.T) {
 					body = `{"itemId":1}`
 				case strings.HasSuffix(path, "/checkout"):
 					checkouts.Add(1)
+					var payment map[string]interface{}
+					if err := json.NewDecoder(r.Body).Decode(&payment); err != nil {
+						t.Fatal(err)
+					}
+					if payment["autoPayWithPreferredPaymentMethod"] != tc.autoPay {
+						t.Fatal("VPS payment policy changed", payment)
+					}
 					if tc.deleteAccount {
 						state.AccountsMu.Lock()
 						state.Accounts = nil

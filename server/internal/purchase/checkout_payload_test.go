@@ -2,7 +2,6 @@ package purchase
 
 import (
 	"os"
-	"regexp"
 	"strings"
 	"testing"
 )
@@ -52,23 +51,14 @@ func TestCheckoutNeverWaivesRetraction(t *testing.T) {
 	}
 }
 
-// 自动付款功能已删除:独服与 VPS 结账都必须固定 autoPayWithPreferredPaymentMethod:false,
-// 不能再由任务或订阅上的任何字段决定。它和撤回权是同一类东西:都是"替用户做花钱决定"。
-func TestCheckoutNeverAutoPays(t *testing.T) {
-	re := regexp.MustCompile(`"autoPayWithPreferredPaymentMethod":\s*([^,\s]+),`)
-	for _, path := range []string{"prepare_cart.go", "../vps/purchase.go"} {
-		src, err := os.ReadFile(path)
-		if err != nil {
-			t.Fatal(err)
+func TestCheckoutPaymentRequiresOptIn(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		payload := checkoutPayload(enabled)
+		if payload["autoPayWithPreferredPaymentMethod"] != enabled {
+			t.Fatal(payload)
 		}
-		matches := re.FindAllStringSubmatch(string(src), -1)
-		if len(matches) == 0 {
-			t.Fatalf("%s: 找不到 autoPayWithPreferredPaymentMethod 的赋值", path)
-		}
-		for _, m := range matches {
-			if m[1] != "false" {
-				t.Fatalf("%s: 结账自动付款必须恒为 false,当前值 %s", path, m[1])
-			}
+		if len(payload) != 1 {
+			t.Fatalf("unexpected checkout fields: %v", payload)
 		}
 	}
 }

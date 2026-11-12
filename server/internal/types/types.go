@@ -147,17 +147,20 @@ type OVHAccount struct {
 
 // QueueItem 抢购队列项
 type QueueItem struct {
-	Duration      string   `json:"duration,omitempty"` // 购买时长；空值兼容旧任务，按 1 个月下单。
-	ID            string   `json:"id"`
-	AccountID     string   `json:"accountId"` // 该任务下单时用的 OVH 账户
-	PlanCode      string   `json:"planCode"`
-	Datacenter    string   `json:"datacenter"`
-	Options       []string `json:"options"`
-	Status        string   `json:"status"` // running / pending / paused / completed
-	CreatedAt     string   `json:"createdAt"`
-	UpdatedAt     string   `json:"updatedAt"`
-	RetryInterval int      `json:"retryInterval"`
-	RetryCount    int      `json:"retryCount"`
+	// AutoPay requires an explicit opt-in; coupon rejection pauses unless fallback is allowed.
+	AutoPay        bool     `json:"autoPay,omitempty"`
+	CouponFallback bool     `json:"couponFallback,omitempty"`
+	Duration       string   `json:"duration,omitempty"` // 购买时长；空值兼容旧任务，按 1 个月下单。
+	ID             string   `json:"id"`
+	AccountID      string   `json:"accountId"` // 该任务下单时用的 OVH 账户
+	PlanCode       string   `json:"planCode"`
+	Datacenter     string   `json:"datacenter"`
+	Options        []string `json:"options"`
+	Status         string   `json:"status"` // running / pending / paused / completed
+	CreatedAt      string   `json:"createdAt"`
+	UpdatedAt      string   `json:"updatedAt"`
+	RetryInterval  int      `json:"retryInterval"`
+	RetryCount     int      `json:"retryCount"`
 	// FailureCount 只统计"真的向 OVH 提交过并失败"的次数;无货的空轮不算。
 	// MaxRetries 封顶用它而不是 RetryCount —— 抢购的常态就是绝大多数轮次都无货,
 	// 拿轮次封顶会让任务在还没真正试过几次时就被判死。
@@ -181,8 +184,8 @@ type QueueItem struct {
 	Force bool `json:"force,omitempty"`
 	// FQN 手填的整套硬件组合(<planCode>.<内存段>.<硬盘段>)。非空时只认库存里这一条,
 	// 其它组合有货也按无货继续等,不会退而求其次下到别的配置
-	FQN string `json:"fqn,omitempty"`
-	OrderPhase         string `json:"orderPhase,omitempty"` // Runtime progress; rebuilt after restart.
+	FQN        string `json:"fqn,omitempty"`
+	OrderPhase string `json:"orderPhase,omitempty"` // Runtime progress; rebuilt after restart.
 }
 
 // PriceInfo 价格信息
@@ -298,6 +301,8 @@ type Subscription struct {
 	AutoOrder          bool                       `json:"autoOrder,omitempty"`
 	Quantity           int                        `json:"quantity,omitempty"`
 	AutoOrderAccountID string                     `json:"autoOrderAccountId,omitempty"` // 空 = 触发时只通知不下单
+	// AutoPay 下单成功后用默认支付方式自动付款(显式开关,默认关)
+	AutoPay bool `json:"autoPay,omitempty"`
 	// Paused 暂停监控:检查循环跳过,订阅与历史保留
 	Paused bool `json:"paused,omitempty"`
 	// Options 只盯这套配置(addon planCode 列表,如 ram-64g / softraid-2x480ssd)。
@@ -314,6 +319,7 @@ type Subscription struct {
 
 // VPSSubscription VPS 监控订阅
 type VPSSubscription struct {
+	AutoPay            bool                     `json:"autoPay,omitempty"`
 	Duration           string                   `json:"duration,omitempty"` // 购买时长；空值兼容旧任务，按 1 个月下单。
 	Revision           uint64                   `json:"-"`
 	ID                 string                   `json:"id"`

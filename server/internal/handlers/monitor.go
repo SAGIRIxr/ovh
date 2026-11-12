@@ -58,17 +58,13 @@ func AddSubscription(state *app.State, mon *monitor.Monitor) gin.HandlerFunc {
 			AutoOrder          bool     `json:"autoOrder"`
 			Quantity           int      `json:"quantity"`
 			AutoOrderAccountID string   `json:"autoOrderAccountId"` // 空 = 触发时只通知不下单
-			// LegacyAutoPay 旧页面字段,仅为兼容;true 会被拒绝(自动付款功能已删除)
-			LegacyAutoPay *bool `json:"autoPay"`
+			AutoPay            bool     `json:"autoPay"`
 			// Options 只盯这套配置(addon planCode 列表)。空 = 全部配置。
 			// 一个 planCode 底下常有好几套内存/存储组合,而通知和自动下单是
 			// 按配置逐套触发的 —— 不筛的话"抢 1 台"会变成"每套配置各抢 1 台"。
 			Options []string `json:"options"`
 		}
 		if !bindOptionalJSON(c, &body) {
-			return
-		}
-		if rejectAutoPay(c, body.LegacyAutoPay) {
 			return
 		}
 		duration, termErr := orderterm.Normalize(body.Duration)
@@ -137,7 +133,7 @@ func AddSubscription(state *app.State, mon *monitor.Monitor) gin.HandlerFunc {
 
 		mon.AddSubscription(body.PlanCode, body.Datacenters, notifyAvailable, notifyUnavailable,
 			serverName, nil, nil, body.AutoOrder, body.Quantity, body.AutoOrderAccountID,
-			body.Options, body.Duration)
+			body.Options, body.Duration, body.AutoPay)
 		if !saveMonitorSubscriptions(c, mon) {
 			return
 		}

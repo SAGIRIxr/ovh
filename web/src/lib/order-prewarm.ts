@@ -1,6 +1,9 @@
 import { apiDatacenterCode } from "@/lib/datacenters";
 
 export interface PrewarmRequest {
+  autoPay?: boolean;
+  couponFallback?: boolean;
+  fqn?: string;
   duration?: string;
   account_id: string;
   planCode: string;
@@ -31,6 +34,7 @@ export function prewarmIdentity(request: PrewarmRequest): string {
   return JSON.stringify({ account_id: request.account_id, planCode: request.planCode.trim(),
     quantity: request.quantity, coupon: request.coupon.trim(), preorder: request.preorder,
     duration: request.duration || "P1M",
+    autoPay: request.autoPay ?? false, couponFallback: !!request.autoPay && !!request.couponFallback, fqn: request.fqn?.trim() || undefined,
     datacenters: [...new Set(request.datacenters.map(apiDatacenterCode))].sort(),
     options: [...new Set(request.options)].sort() });
 }

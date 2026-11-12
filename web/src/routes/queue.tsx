@@ -640,11 +640,14 @@ function BatchCopyDialog({
   const accounts = accountsQ.data || [];
   const copy = useCopyQueueItems();
   const [targets, setTargets] = useState<Set<string>>(new Set());
+  const [keepAutoPay, setKeepAutoPay] = useState(false);
   useEffect(() => {
     if (open) {
       setTargets(new Set());
+      setKeepAutoPay(false);
     }
   }, [open]);
+  const autoPayCount = items.filter((i) => i.autoPay).length;
   // 每个任务复制到每个「不是它自己账户」的目标;和 useCopyQueueItems 同一套判重,
   // 确认前就说清楚会新建几个、跳过几个
   const { planned, duplicates } = useMemo(() => {
@@ -666,7 +669,7 @@ function BatchCopyDialog({
   }, [existing, items, targets]);
 
   const run = async () => {
-    const r = await copy.mutateAsync({ items, accountIds: [...targets], existing });
+    const r = await copy.mutateAsync({ items, accountIds: [...targets], keepAutoPay, existing });
     if (r.failed === 0) toast.success(t("queue.copy.done", { created: r.created, skipped: r.skipped }));
     else toast.error(t("queue.copy.partial", { created: r.created, skipped: r.skipped, failed: r.failed, error: r.firstError }));
     onOpenChange(false);
@@ -700,6 +703,17 @@ function BatchCopyDialog({
               </span>
             </label>
           ))}
+          {autoPayCount > 0 && (
+            <div>
+              <label className="flex items-center gap-2 cursor-pointer text-[13px]">
+                <Checkbox checked={keepAutoPay} onCheckedChange={(v) => setKeepAutoPay(!!v)} />
+                {t("queue.copy.keepAutoPay")}
+              </label>
+              <p className={"text-[11px] mt-1 " + (keepAutoPay ? "text-warning" : "text-muted-foreground")}>
+                {keepAutoPay ? t("queue.copy.keepAutoPayOn", { n: autoPayCount }) : t("queue.copy.keepAutoPayOff", { n: autoPayCount })}
+              </p>
+            </div>
+          )}
           <p className="text-[12px] text-muted-foreground">{t("queue.copy.planned", { n: planned, dup: duplicates })}</p>
         </div>
         <DialogFooter>
@@ -779,8 +793,10 @@ function CreateQueueDialog({
   }, [cfgDefault]);
   // 这个对话框和服务器卡片弹的那个是两条建任务入口,开关两边都要有 ——
   // 上一版只加了卡片那边,这边漏了
+  const [autoPay, setAutoPay] = useState(false);
   const [duration, setDuration] = useState("P1M");
   const [coupon, setCoupon] = useState("");
+  const [couponFallback, setCouponFallback] = useState(false);
   // 后端说「哪里都查不到这个型号」时的提示,带一个强制入队按钮
   const [forceHint, setForceHint] = useState("");
   // 用户选的 addon,按组索引。每次切 planCode 自动清空(让用户重新选)。
@@ -803,8 +819,10 @@ function CreateQueueDialog({
         setQuantity(String(editing.groupLimit || 1));
         setRetryInterval(String(editing.retryInterval || cfgDefault));
         touchedRef.current = true;
-        setDuration(editing.duration || "P1M");
+        setAutoPay(!!editing.autoPay);
+      setDuration(editing.duration || "P1M");
         setCoupon(editing.coupon || "");
+        setCouponFallback(!!editing.couponFallback);
       } else if (copyFrom) {
         // 复制给别的账户用:默认挑第一个不是原任务账户的
         const other = accounts?.find((a) => a.id !== copyFrom.accountId);
@@ -812,7 +830,10 @@ function CreateQueueDialog({
         setDatacenters([OVH_DATACENTERS.find((dc) => apiDatacenterCode(dc.code) === apiDatacenterCode(copyFrom.datacenter))?.code || copyFrom.datacenter]);
         setRetryInterval(String(copyFrom.retryInterval || cfgDefault));
         touchedRef.current = true;
+        // 换了账户就换了钱包:自动付款不跟着复制,要用户自己再勾
+        setAutoPay(false);
         setCoupon(copyFrom.coupon || "");
+        setCouponFallback(false);
         if (copyFrom.fqn) {
           setManualFqn(copyFrom.fqn);
           setManualOpen(true);
@@ -948,7 +969,7 @@ function CreateQueueDialog({
   const canSubmit = durationSupported && !!activeAcc && planCode.trim().length > 0 && datacenters.length > 0 && qty > 0 && !prereleaseMismatch && !fqnMismatch && !fqnBlocked && (!preorder || hasPreorderHardware(parsedOptions));
   const preparation = useOrderPrewarm(open && !editing && canSubmit, {
     account_id: accountId, planCode: planCode.trim(), datacenters, options: parsedOptions,
-    quantity: qty, coupon, duration, preorder,
+    quantity: qty, coupon, duration, preorder, autoPay, couponFallback: autoPay && couponFallback, fqn: effectiveFqn,
   });
 
   const reset = () => {
@@ -957,8 +978,10 @@ function CreateQueueDialog({
     setDatacenters([]);
     setQuantity("1");
     setChosenScope("");
+    setAutoPay(false);
     setDuration("P1M");
     setCoupon("");
+    setCouponFallback(false);
     setForceHint("");
     touchedRef.current = false;
     setRetryInterval(String(cfgDefault));
@@ -993,7 +1016,7 @@ function CreateQueueDialog({
     if (editing) {
       try {
         await update.mutateAsync({ id: editing.id, datacenter: datacenters[0], options: parsedOptions,
-          retryInterval: Number(retryInterval) || cfgDefault, coupon: coupon.trim(), duration });
+          retryInterval: Number(retryInterval) || cfgDefault, autoPay, couponFallback: autoPay && couponFallback, coupon: coupon.trim(), duration });
         reset(); onOpenChange(false);
       } catch { /* Error is shown by the mutation hook; keep the form open. */ }
       return;
@@ -1005,6 +1028,8 @@ function CreateQueueDialog({
       quantity: qty,
       retryInterval: Number(retryInterval) || cfgDefault,
       options: parsedOptions,
+      autoPay,
+      couponFallback: autoPay && couponFallback,
       coupon,
       duration,
       preorder,
@@ -1255,7 +1280,25 @@ function CreateQueueDialog({
             </p>
           </div>
 
-          <p className="text-[11px] text-muted-foreground">{t("queue.payManual")}</p>
+          <label className="flex items-center gap-2 cursor-pointer text-[13px]">
+            <Checkbox checked={autoPay} onCheckedChange={(v) => setAutoPay(!!v)} />
+            {t("queue.autoPay")}
+          </label>
+          <p className="text-[11px] text-muted-foreground -mt-2">
+            {autoPay ? t("queue.autoPayOn") : t("queue.autoPayOff")}
+          </p>
+          {/* 只有「有优惠码 + 自动付款」时才存在"被拒后要不要按原价扣钱"这个问题 */}
+          {autoPay && coupon.trim() && (
+            <div className="-mt-1">
+              <label className="flex items-center gap-2 cursor-pointer text-[13px]">
+                <Checkbox checked={couponFallback} onCheckedChange={(v) => setCouponFallback(!!v)} />
+                {t("queue.couponFallback")}
+              </label>
+              <p className="text-[11px] text-muted-foreground mt-1">
+                {couponFallback ? t("queue.couponFallbackOn") : t("queue.couponFallbackOff")}
+              </p>
+            </div>
+          )}
 
           {forceHint && !editing && (
             <div className="rounded-xl border border-warning/40 bg-warning/5 px-3 py-2.5 text-[12px] space-y-2" role="alert">
@@ -1487,7 +1530,7 @@ export function QueueRow({
             <Chip><OrderDurationLabel value={item.duration} /></Chip>
             {item.stopReason && <Chip tone="warning">{t(`queue.${item.stopReason}`)}</Chip>}
             {item.status === "running" && item.orderPhase && <Chip tone="info">{t(`queue.phase.${item.orderPhase}`)}</Chip>}
-            {item.coupon && <Chip>{t("queue.couponValue", { code: item.coupon })}</Chip>}
+            {item.coupon && <Chip title={item.autoPay ? t(item.couponFallback ? "queue.couponFallbackOn" : "queue.couponFallbackOff") : undefined}>{t("queue.couponValue", { code: item.coupon })}</Chip>}
             <Chip tone="default">DC {item.datacenter.toUpperCase()}</Chip>
             {item.options && item.options.length > 0 && (
               // 以前只显示个数。而一个型号底下几套配置的差别恰恰在这里 ——
@@ -1502,6 +1545,11 @@ export function QueueRow({
             {item.fqn && (
               <Chip tone="info" className="font-mono" title={t("queue.manual.fqnRowTitle", { fqn: item.fqn })}>
                 FQN {fqnHardware(item.fqn)}
+              </Chip>
+            )}
+            {item.autoPay && (
+              <Chip tone="warning" title={t("queue.autoPayChipTitle")}>
+                {t("queue.autoPayChip")}
               </Chip>
             )}
             {item.status !== "completed" && <TimingChip totalMs={timing?.totalMs} phases={timing?.phases} />}

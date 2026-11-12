@@ -17,6 +17,7 @@ func TestSetSubscriptionOptionsOnlyTouchesOptions(t *testing.T) {
 			Options:            []string{"old-addon"},
 			NotifyAvailable:    true,
 			AutoOrder:          true,
+			AutoPay:            true,
 			Quantity:           3,
 			AutoOrderAccountID: "acc-eu",
 			LastStatus:         map[string]string{"gra": "1H-low"},
@@ -33,7 +34,7 @@ func TestSetSubscriptionOptionsOnlyTouchesOptions(t *testing.T) {
 		t.Fatalf("Options 没改成: %v", s.Options)
 	}
 	// 花钱相关的设置必须原样
-	if !s.AutoOrder || s.Quantity != 3 || s.AutoOrderAccountID != "acc-eu" {
+	if !s.AutoPay || !s.AutoOrder || s.Quantity != 3 || s.AutoOrderAccountID != "acc-eu" {
 		t.Fatalf("自动下单设置被改动了: %+v", s)
 	}
 	// 状态与历史必须原样 —— 清掉会造成一条虚假的补货通知

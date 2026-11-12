@@ -10,6 +10,7 @@ import (
 
 	"github.com/ovh-buy/server/internal/app"
 	"github.com/ovh-buy/server/internal/catalog"
+	"github.com/ovh-buy/server/internal/notify"
 	"github.com/ovh-buy/server/internal/numconv"
 	"github.com/ovh-buy/server/internal/orderterm"
 	"github.com/ovh-buy/server/internal/ovh"
@@ -516,6 +517,16 @@ func prepareCart(ctx context.Context, state *app.State, item *types.QueueItem, a
 				return nil, Outcome{}
 			}
 			// 明确被拒绝才回退;网络故障不能当作优惠码无效。
+			if item.AutoPay && !item.CouponFallback {
+				msg := fmt.Sprintf("优惠码 %s 被 OVH 拒绝，任务已暂停，没有按原价付款。原因: %s", coupon, ovh.Explain(err))
+				state.Logger.Warn(msg, "purchase")
+				recordTiming(timingKey, tl, "failed")
+				fail(msg)
+				if !preparing {
+					notify.Broadcast(state, fmt.Sprintf("⚠️ 抢购 %s@%s: %s\n\n换个优惠码，或勾选「优惠码无效时仍按原价付款」后恢复。", item.PlanCode, item.Datacenter, msg), nil)
+				}
+				return nil, Outcome{PauseTask: true, PauseReason: msg, Reason: msg}
+			}
 			couponWarning = "优惠码被 OVH 拒绝，本次未使用优惠码，价格不包含该码优惠。原因: " + ovh.Explain(err)
 			state.Logger.Warn(couponWarning, "purchase")
 		} else {
@@ -537,7 +548,7 @@ func prepareCart(ctx context.Context, state *app.State, item *types.QueueItem, a
 		return nil, Outcome{Fatal: errors.Is(err, orderterm.ErrCartPeriod), Reason: err.Error()}
 	}
 	// URL、序列化正文和静态头在等待库存时全部确定,不会提前发送 checkout。
-	call, err := ovh.PreparePost(client, "/order/cart/"+cartID+"/checkout", checkoutPayload())
+	call, err := ovh.PreparePost(client, "/order/cart/"+cartID+"/checkout", checkoutPayload(item.AutoPay))
 	if err != nil {
 		return nil, attemptOutcome(err)
 	}
@@ -553,10 +564,10 @@ func listingNotReady(err error) bool {
 	return errors.As(err, &apiErr) && (apiErr.Code == 400 || apiErr.Code == 404 || apiErr.Code == 409)
 }
 
-// checkoutPayload 结账请求体。自动付款功能已删除:永不使用默认支付方式扣款;
+// checkoutPayload 只按任务中显式保存的自动付款选择构建结账请求体;
 // 也不发送 waiveRetractationPeriod,保留 14 天撤回权。
-func checkoutPayload() map[string]interface{} {
+func checkoutPayload(autoPay bool) map[string]interface{} {
 	return map[string]interface{}{
-		"autoPayWithPreferredPaymentMethod": false,
+		"autoPayWithPreferredPaymentMethod": autoPay,
 	}
 }

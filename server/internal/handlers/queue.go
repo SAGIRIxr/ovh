@@ -28,17 +28,17 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 			Duration  string `json:"duration"`
 			AccountID string `json:"account_id"`
 			// AccountIDs 多账户一起抢同一单:任一账户抢到都计入同一份数量上限,台数不会按账户翻倍。
-			AccountIDs    []string `json:"account_ids"`
-			PlanCode      string   `json:"planCode"`
-			Datacenter    string   `json:"datacenter"`
-			Datacenters   []string `json:"datacenters"`
-			Quantity      *int     `json:"quantity"`
-			PurchaseMode  string   `json:"purchaseMode"`
-			Options       []string `json:"options"`
-			RetryInterval int      `json:"retryInterval"`
-			// LegacyAutoPay 旧页面字段,仅为兼容;true 会被拒绝(自动付款功能已删除)
-			LegacyAutoPay *bool `json:"autoPay"`
-			Preorder      bool  `json:"preorder"`
+			AccountIDs     []string `json:"account_ids"`
+			PlanCode       string   `json:"planCode"`
+			Datacenter     string   `json:"datacenter"`
+			Datacenters    []string `json:"datacenters"`
+			Quantity       *int     `json:"quantity"`
+			PurchaseMode   string   `json:"purchaseMode"`
+			Options        []string `json:"options"`
+			RetryInterval  int      `json:"retryInterval"`
+			AutoPay        bool     `json:"autoPay"`
+			CouponFallback bool     `json:"couponFallback"`
+			Preorder       bool     `json:"preorder"`
 			// PreorderWaitStock 预售等库存出现再结账,默认开售即下
 			PreorderWaitStock bool   `json:"preorderWaitStock"`
 			Coupon            string `json:"coupon"`
@@ -49,9 +49,6 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 		}
 		if err := bindOrderJSON(c, &body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "任务参数格式不正确", "details": err.Error()})
-			return
-		}
-		if rejectAutoPay(c, body.LegacyAutoPay) {
 			return
 		}
 		duration, termErr := orderterm.Normalize(body.Duration)
@@ -137,7 +134,7 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 				for n := 0; n < qty; n++ {
 					item := types.QueueItem{ID: uuid.NewString(), AccountID: account, Duration: body.Duration, PlanCode: body.PlanCode, Datacenter: dc,
 						Options: append([]string(nil), body.Options...), Status: "running", CreatedAt: types.NowISO(), UpdatedAt: types.NowISO(), RetryInterval: body.RetryInterval,
-						Preorder: body.Preorder, PreorderWaitStock: body.Preorder && body.PreorderWaitStock, Coupon: strings.TrimSpace(body.Coupon), OrderGroup: dcGroup,
+						AutoPay: body.AutoPay, CouponFallback: body.AutoPay && body.CouponFallback, Preorder: body.Preorder, PreorderWaitStock: body.Preorder && body.PreorderWaitStock, Coupon: strings.TrimSpace(body.Coupon), OrderGroup: dcGroup,
 						Force: body.Force, FQN: body.FQN}
 					if dcGroup != "" {
 						item.GroupLimit = qty
@@ -209,19 +206,16 @@ func RemoveQueueItem(state *app.State) gin.HandlerFunc {
 func UpdateQueueItem(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var body struct {
-			Duration      *string  `json:"duration"`
-			Datacenter    string   `json:"datacenter"`
-			Options       []string `json:"options"`
-			RetryInterval int      `json:"retryInterval"`
-			// LegacyAutoPay 旧页面字段,仅为兼容;true 会被拒绝(自动付款功能已删除)
-			LegacyAutoPay *bool  `json:"autoPay"`
-			Coupon        string `json:"coupon"`
+			Duration       *string  `json:"duration"`
+			Datacenter     string   `json:"datacenter"`
+			Options        []string `json:"options"`
+			RetryInterval  int      `json:"retryInterval"`
+			AutoPay        bool     `json:"autoPay"`
+			CouponFallback bool     `json:"couponFallback"`
+			Coupon         string   `json:"coupon"`
 		}
 		if err := bindOrderJSON(c, &body); err != nil || strings.TrimSpace(body.Datacenter) == "" || body.RetryInterval < types.MinRetryInterval || body.RetryInterval > types.MaxRetryInterval {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "请填写机房及有效的重试间隔"})
-			return
-		}
-		if rejectAutoPay(c, body.LegacyAutoPay) {
 			return
 		}
 		if body.Duration != nil {
@@ -230,7 +224,7 @@ func UpdateQueueItem(state *app.State) gin.HandlerFunc {
 				return
 			}
 		}
-		if err := state.UpdateQueueItem(c.Param("id"), strings.TrimSpace(body.Datacenter), body.Options, body.RetryInterval, strings.TrimSpace(body.Coupon), body.Duration); err != nil {
+		if err := state.UpdateQueueItem(c.Param("id"), strings.TrimSpace(body.Datacenter), body.Options, body.RetryInterval, strings.TrimSpace(body.Coupon), body.Duration, body.AutoPay, body.CouponFallback); err != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(err, app.ErrQueueNotFound) {
 				status = http.StatusNotFound

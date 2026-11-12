@@ -75,7 +75,7 @@ func NewCartPool(state *app.State) *CartPool {
 func preparationKey(item types.QueueItem, account types.OVHAccount) string {
 	options := append([]string(nil), item.Options...)
 	sort.Strings(options)
-	data, _ := json.Marshal([]interface{}{account.ID, account.Endpoint, account.Zone, account.AppKey, account.AppSecret, account.ConsumerKey, account.ProxyURL, account.Fingerprint, item.PlanCode, normalizedDuration(item.Duration), ovh.ConvertDisplayDCToAPIDC(item.Datacenter), options, strings.TrimSpace(item.Coupon), item.Preorder})
+	data, _ := json.Marshal([]interface{}{account.ID, account.Endpoint, account.Zone, account.AppKey, account.AppSecret, account.ConsumerKey, account.ProxyURL, account.Fingerprint, item.PlanCode, normalizedDuration(item.Duration), ovh.ConvertDisplayDCToAPIDC(item.Datacenter), options, strings.TrimSpace(item.Coupon), item.AutoPay, item.CouponFallback, strings.TrimSpace(item.FQN), item.Force, item.Preorder})
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
@@ -263,7 +263,7 @@ func (p *CartPool) assemble(ctx context.Context, entry *warmEntry) (*preparedCar
 			if item.Preorder {
 				matches = preorderFQNCoversOptions(value, wanted) && strings.EqualFold(strings.SplitN(value, ".", 2)[0], item.PlanCode)
 			}
-			if value == "" || !matches {
+			if value == "" || !matches || (item.FQN != "" && !strings.EqualFold(value, strings.TrimSpace(item.FQN))) {
 				continue
 			}
 			dcs, _ := variant["datacenters"].([]interface{})

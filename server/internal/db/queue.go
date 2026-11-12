@@ -27,18 +27,16 @@ type queueRow struct {
 	Priority           int     `db:"priority"`
 	FromTelegram       int     `db:"from_telegram"`
 	ConfigSniperTaskID string  `db:"config_sniper_task_id"`
-	// AutoPay 旧版「自动付款」列,功能已删除:读取时忽略,写入恒为 0(清掉旧值)
-	AutoPay           int    `db:"auto_pay"`
-	Preorder          int    `db:"preorder"`
-	PreorderWaitStock int    `db:"preorder_wait_stock"`
-	Coupon            string `db:"coupon"`
-	OrderGroup        string `db:"order_group"`
-	GroupLimit        int    `db:"group_limit"`
-	StopReason        string `db:"stop_reason"`
-	ForceOrder        int    `db:"force_order"`
-	FQN               string `db:"fqn"`
-	// 下面三列属于已删除的功能(优惠码被拒仍付款 / 结账未决标记,前者随自动付款一起删,
-	// 后者由上游的订单核对取代)。老库里有这些列,SELECT * 严格映射必须留着字段;写入恒为零值
+	AutoPay            int     `db:"auto_pay"`
+	Preorder           int     `db:"preorder"`
+	PreorderWaitStock  int     `db:"preorder_wait_stock"`
+	Coupon             string  `db:"coupon"`
+	OrderGroup         string  `db:"order_group"`
+	GroupLimit         int     `db:"group_limit"`
+	StopReason         string  `db:"stop_reason"`
+	ForceOrder         int     `db:"force_order"`
+	FQN                string  `db:"fqn"`
+	// CouponFallback preserves the user payment policy. The uncertain columns are legacy; upstream checkout records replace them.
 	CouponFallback    int    `db:"coupon_fallback"`
 	UncertainCheckout int    `db:"uncertain_checkout"`
 	UncertainTime     string `db:"uncertain_time"`
@@ -73,6 +71,7 @@ func rowToQueueItem(r queueRow) (types.QueueItem, error) {
 		Priority:           r.Priority,
 		FromTelegram:       r.FromTelegram == 1,
 		ConfigSniperTaskID: r.ConfigSniperTaskID,
+		AutoPay:            r.AutoPay == 1,
 		Preorder:           r.Preorder == 1,
 		PreorderWaitStock:  r.Preorder == 1 && r.PreorderWaitStock == 1,
 		Coupon:             r.Coupon,
@@ -80,6 +79,7 @@ func rowToQueueItem(r queueRow) (types.QueueItem, error) {
 		GroupLimit:         r.GroupLimit,
 		StopReason:         r.StopReason,
 		Force:              r.ForceOrder == 1,
+		CouponFallback:     r.CouponFallback == 1,
 		FQN:                r.FQN,
 	}, nil
 }
@@ -117,6 +117,7 @@ func queueItemToRow(q types.QueueItem) (queueRow, error) {
 		Priority:           q.Priority,
 		FromTelegram:       bi(q.FromTelegram),
 		ConfigSniperTaskID: q.ConfigSniperTaskID,
+		AutoPay:            bi(q.AutoPay),
 		Preorder:           bi(q.Preorder),
 		PreorderWaitStock:  bi(q.Preorder && q.PreorderWaitStock),
 		Coupon:             q.Coupon,
@@ -124,6 +125,7 @@ func queueItemToRow(q types.QueueItem) (queueRow, error) {
 		GroupLimit:         q.GroupLimit,
 		StopReason:         q.StopReason,
 		ForceOrder:         bi(q.Force),
+		CouponFallback:     bi(q.CouponFallback),
 		FQN:                q.FQN,
 	}, nil
 }

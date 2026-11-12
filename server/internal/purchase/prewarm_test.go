@@ -29,6 +29,29 @@ func poolItem() types.QueueItem {
 	return types.QueueItem{ID: "pooled", AccountID: "hot-eu", PlanCode: "plan", Datacenter: "gra", Options: []string{"ram-32g"}, Status: "running"}
 }
 
+func TestPoolRespectsPinnedFQN(t *testing.T) {
+	state, carts, checkouts, _ := hotFixture(t)
+	pool := NewCartPool(state)
+	t.Cleanup(pool.Close)
+	item := poolItem()
+	item.FQN = "plan.ram-64g"
+	if err := pool.Prepare("web:pinned", []types.QueueItem{item}, time.Minute, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitWarm(t, func() bool { s := pool.Status("web:pinned"); return len(s) == 1 && s[0].State == "waiting" })
+	if pool.Ready(item) || carts.Load() != 0 || checkouts.Load() != 0 {
+		t.Fatal("prepared a different hardware configuration")
+	}
+	item.FQN = "PLAN.RAM-32G"
+	if err := pool.Prepare("web:pinned", []types.QueueItem{item}, time.Minute, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitWarm(t, func() bool { return pool.Ready(item) })
+	if carts.Load() != 1 || checkouts.Load() != 0 {
+		t.Fatal("matching FQN was not prepared without checkout")
+	}
+}
+
 func TestPoolPreparationIsReadOnlyAndConsumedOnce(t *testing.T) {
 	state, carts, checkouts, _ := hotFixture(t)
 	pool := NewCartPool(state)
@@ -51,6 +74,9 @@ func TestPoolPreparationIsReadOnlyAndConsumedOnce(t *testing.T) {
 		func(i *types.QueueItem) { i.PlanCode = "other" },
 		func(i *types.QueueItem) { i.Options = []string{"ram-64g"} },
 		func(i *types.QueueItem) { i.Coupon = "discount" },
+		func(i *types.QueueItem) { i.AutoPay = true },
+		func(i *types.QueueItem) { i.CouponFallback = true },
+		func(i *types.QueueItem) { i.FQN = "plan.other" },
 		func(i *types.QueueItem) { i.Duration = "P12M" },
 		func(i *types.QueueItem) { i.Preorder = true },
 	} {

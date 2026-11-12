@@ -2,10 +2,18 @@ package purchase
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/ovh-buy/server/internal/types"
 )
+
+func TestAutoPayMessageDoesNotClaimPaymentSucceeded(t *testing.T) {
+	msg := BuildOrderSuccessMessage(&types.QueueItem{AutoPay: true}, "123", "")
+	if !strings.Contains(msg, "已请求") || !strings.Contains(msg, "核对扣款是否成功") || strings.Contains(msg, "尚未付款") || strings.Contains(msg, "已按惯例放弃") {
+		t.Fatal(msg)
+	}
+}
 
 // 这是整个系统里唯一一条"你花钱了"的消息,措辞必须能单独审。
 func TestDumpOrderMessages(t *testing.T) {

@@ -258,12 +258,18 @@ test("coupon and quantity scope are sent in one atomic queue request", async () 
     assert.equal(bodies[0].purchaseMode, "total");
     for (const body of bodies) {
       assert.equal(body.coupon, "Save10");
-      assert.equal("autoPay" in body, false); // 自动付款已删除:请求不再携带该字段
+      assert.equal(body.autoPay, false);
+      assert.equal(body.couponFallback, false);
       assert.equal(body.preorder, true);
       assert.deepEqual(body.options, ["ram-64g"]);
     }
     await mutation.mutateAsync({ account_id: "eu", planCode: "24sk202", datacenters: ["gra"], coupon: "  " });
     assert.equal(bodies.at(-1).coupon, undefined);
+    await mutation.mutateAsync({ account_id: "eu", planCode: "24sk202", datacenters: ["gra"], autoPay: true, couponFallback: true, coupon: "SAVE" });
+    assert.equal(bodies.at(-1).autoPay, true);
+    assert.equal(bodies.at(-1).couponFallback, true);
+    await mutation.mutateAsync({ account_id: "eu", planCode: "24sk202", datacenters: ["gra"], autoPay: false, couponFallback: true });
+    assert.equal(bodies.at(-1).couponFallback, false);
   } finally {
     api.defaults.adapter = adapter;
     client.clear();
@@ -902,8 +908,9 @@ test("prewarm identity includes account, payment and coupon while normalizing se
   const { prewarmIdentity } = await server.ssrLoadModule("/src/lib/order-prewarm.ts");
   const request = { account_id: "eu", planCode: "plan", datacenters: ["mum", "bhs"], options: ["ram-32g", "storage"], quantity: 1, coupon: "SAVE", preorder: false };
   const key = prewarmIdentity(request);
+  assert.notEqual(prewarmIdentity({ ...request, autoPay: true }), prewarmIdentity({ ...request, autoPay: true, couponFallback: true }));
   assert.equal(key, prewarmIdentity({ ...request, datacenters: ["bhs", "ynm", "mum"], options: ["storage", "ram-32g", "storage"], coupon: " SAVE " }));
-  for (const change of [{ account_id: "us" }, { coupon: "OTHER" }, { options: ["ram-64g"] }, { quantity: 2 }]) {
+  for (const change of [{ autoPay: true }, { fqn: "plan.locked" }, { account_id: "us" }, { coupon: "OTHER" }, { options: ["ram-64g"] }, { quantity: 2 }]) {
     assert.notEqual(key, prewarmIdentity({ ...request, ...change }));
   }
 });

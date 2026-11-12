@@ -39,13 +39,13 @@ func TestPurchasePeriodsSurviveRestartAndUpsert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.ReplaceQueue([]types.QueueItem{{ID: "annual", PlanCode: "plan", Duration: "P12M", CreatedAt: "now"}, {ID: "legacy", PlanCode: "plan", CreatedAt: "now"}}); err != nil {
+	if err := database.ReplaceQueue([]types.QueueItem{{ID: "annual", PlanCode: "plan", AutoPay: true, CouponFallback: true, Duration: "P12M", CreatedAt: "now"}, {ID: "legacy", PlanCode: "plan", CreatedAt: "now"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.ReplaceHistory([]types.PurchaseHistoryEntry{{ID: "history", PlanCode: "plan", Duration: "P24M", PurchaseTime: "now"}}); err != nil {
 		t.Fatal(err)
 	}
-	sub := types.Subscription{PlanCode: "plan", Duration: "P3M", CreatedAt: "now"}
+	sub := types.Subscription{AutoPay: true, PlanCode: "plan", Duration: "P3M", CreatedAt: "now"}
 	if err := database.UpsertMonitorSubscription(sub); err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +53,7 @@ func TestPurchasePeriodsSurviveRestartAndUpsert(t *testing.T) {
 	if err := database.UpsertMonitorSubscription(sub); err != nil {
 		t.Fatal(err)
 	}
-	vps := types.VPSSubscription{ID: "vps", PlanCode: "vps", Duration: "P6M", CreatedAt: "now"}
+	vps := types.VPSSubscription{AutoPay: true, ID: "vps", PlanCode: "vps", Duration: "P6M", CreatedAt: "now"}
 	if err := database.UpsertVPSSubscription(vps); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestPurchasePeriodsSurviveRestartAndUpsert(t *testing.T) {
 	}
 	defer database.Close()
 	items, err := database.ListQueue()
-	if err != nil || len(items) != 2 || items[0].Duration != "P12M" || items[1].Duration != "" {
+	if err != nil || len(items) != 2 || !items[0].AutoPay || !items[0].CouponFallback || items[0].Duration != "P12M" || items[1].Duration != "" {
 		t.Fatal(items, err)
 	}
 	history, err := database.ListHistory()
@@ -76,11 +76,11 @@ func TestPurchasePeriodsSurviveRestartAndUpsert(t *testing.T) {
 		t.Fatal(history, err)
 	}
 	subs, err := database.ListMonitorSubscriptions()
-	if err != nil || len(subs) != 1 || subs[0].Duration != "P12M" {
+	if err != nil || len(subs) != 1 || !subs[0].AutoPay || subs[0].Duration != "P12M" {
 		t.Fatal(subs, err)
 	}
 	vpsSubs, err := database.ListVPSSubscriptions()
-	if err != nil || len(vpsSubs) != 1 || vpsSubs[0].Duration != "P24M" {
+	if err != nil || len(vpsSubs) != 1 || !vpsSubs[0].AutoPay || vpsSubs[0].Duration != "P24M" {
 		t.Fatal(vpsSubs, err)
 	}
 }

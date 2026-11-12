@@ -47,11 +47,11 @@ func TestPrepareRouteValidatesAndNeverEnqueues(t *testing.T) {
 		router.ServeHTTP(w, r)
 		return w
 	}
-	valid := `{"id":"unique-request","account_id":"eu","planCode":"plan","datacenters":["mum","bhs"],"quantity":2,"options":["ram-32g"],"coupon":"SAVE","autoPay":false,"standby":true,"duration":"P1Y"}`
+	valid := `{"id":"unique-request","account_id":"eu","planCode":"plan","datacenters":["mum","bhs"],"quantity":2,"options":["ram-32g"],"coupon":"SAVE","autoPay":true,"couponFallback":true,"fqn":"plan.ram-32g","standby":true,"duration":"P1Y"}`
 	if w := request(valid); w.Code != 202 {
 		t.Fatal(w.Code, w.Body.String())
 	}
-	if pool.owner != "web:unique-request" || pool.lease != 45*time.Minute || len(pool.items) != 4 || pool.items[0].Datacenter != "ynm" || pool.items[0].Duration != "P12M" || pool.items[0].Coupon != "SAVE" || len(state.Queue) != 0 || len(state.History) != 0 {
+	if pool.owner != "web:unique-request" || pool.lease != 45*time.Minute || len(pool.items) != 4 || pool.items[0].Datacenter != "ynm" || pool.items[0].Duration != "P12M" || pool.items[0].Coupon != "SAVE" || !pool.items[0].AutoPay || !pool.items[0].CouponFallback || pool.items[0].FQN != "plan.ram-32g" || len(state.Queue) != 0 || len(state.History) != 0 {
 		t.Fatalf("wrong intent: %+v", pool)
 	}
 	for _, body := range []string{

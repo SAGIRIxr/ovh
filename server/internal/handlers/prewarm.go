@@ -15,24 +15,22 @@ import (
 func PrepareOrderCart(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var body struct {
-			Duration    string   `json:"duration"`
-			ID          string   `json:"id"`
-			AccountID   string   `json:"account_id"`
-			PlanCode    string   `json:"planCode"`
-			Datacenters []string `json:"datacenters"`
-			Options     []string `json:"options"`
-			Quantity    int      `json:"quantity"`
-			// LegacyAutoPay 旧页面字段,仅为兼容;true 会被拒绝(自动付款功能已删除)
-			LegacyAutoPay *bool  `json:"autoPay"`
-			Coupon        string `json:"coupon"`
-			Preorder      bool   `json:"preorder"`
-			Standby       bool   `json:"standby"`
+			Duration       string   `json:"duration"`
+			ID             string   `json:"id"`
+			AccountID      string   `json:"account_id"`
+			PlanCode       string   `json:"planCode"`
+			Datacenters    []string `json:"datacenters"`
+			Options        []string `json:"options"`
+			Quantity       int      `json:"quantity"`
+			AutoPay        bool     `json:"autoPay"`
+			CouponFallback bool     `json:"couponFallback"`
+			FQN            string   `json:"fqn"`
+			Coupon         string   `json:"coupon"`
+			Preorder       bool     `json:"preorder"`
+			Standby        bool     `json:"standby"`
 		}
 		if err := bindOrderJSON(c, &body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "备车参数不完整或数量超限", "code": "PREWARM_INVALID", "details": err.Error()})
-			return
-		}
-		if rejectAutoPay(c, body.LegacyAutoPay) {
 			return
 		}
 		if !validPrewarmID(body.ID) || body.AccountID == "" || strings.TrimSpace(body.PlanCode) == "" || len(body.PlanCode) > 200 || len(body.Datacenters) == 0 || body.Quantity < 1 || body.Quantity > types.MaxOrderQuantity || len(body.Datacenters)*body.Quantity > types.MaxOrderFanout {
@@ -60,7 +58,7 @@ func PrepareOrderCart(state *app.State) gin.HandlerFunc {
 			}
 			seen[dc] = true
 			for n := 0; n < body.Quantity; n++ {
-				items = append(items, types.QueueItem{AccountID: body.AccountID, Duration: body.Duration, PlanCode: strings.TrimSpace(body.PlanCode), Datacenter: dc, Options: body.Options, Coupon: strings.TrimSpace(body.Coupon), Preorder: body.Preorder})
+				items = append(items, types.QueueItem{AccountID: body.AccountID, Duration: body.Duration, PlanCode: strings.TrimSpace(body.PlanCode), Datacenter: dc, Options: body.Options, FQN: strings.TrimSpace(body.FQN), AutoPay: body.AutoPay, CouponFallback: body.AutoPay && body.CouponFallback, Coupon: strings.TrimSpace(body.Coupon), Preorder: body.Preorder})
 			}
 		}
 		lease := 2 * time.Minute

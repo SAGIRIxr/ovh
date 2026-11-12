@@ -304,7 +304,8 @@ func (m *Monitor) batchOrder(planCode string, configInfo map[string]interface{},
 		return
 	}
 	duration, _ := configInfo["duration"].(string)
-	if err := m.state.EnqueueMonitorOrders(accountID, planCode, dcs, options, quantity, duration); err != nil {
+	autoPay, _ := configInfo["autoPay"].(bool)
+	if err := m.state.EnqueueMonitorOrders(accountID, planCode, dcs, options, quantity, duration, autoPay); err != nil {
 		m.state.Logger.Warn("[monitor->order] 入队未执行: "+err.Error(), "monitor")
 	}
 }

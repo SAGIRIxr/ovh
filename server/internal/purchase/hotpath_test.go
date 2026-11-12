@@ -234,6 +234,8 @@ func TestPreparedSessionCannotKeepOldCouponOrHardwareIntent(t *testing.T) {
 		change func(*types.QueueItem)
 	}{
 		{"coupon", func(i *types.QueueItem) { i.Coupon = "discount" }},
+		{"payment", func(i *types.QueueItem) { i.AutoPay = true }},
+		{"coupon fallback", func(i *types.QueueItem) { i.CouponFallback = true }},
 		{"hardware", func(i *types.QueueItem) { i.Options = []string{"ram-64g"} }},
 		{"model", func(i *types.QueueItem) { i.PlanCode = "other" }},
 		{"datacenter", func(i *types.QueueItem) { i.Datacenter = "bhs" }},

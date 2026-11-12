@@ -125,7 +125,7 @@ type State struct {
 	// InternalToken 进程内自调用(监控询价打本机 /api/internal/*)用的令牌,启动时随机生成、只在内存里。
 	// 不再拿访问密钥自调用:关掉访问密钥登录之后,内部调用不能跟着失效
 	InternalToken string
-	Port   string
+	Port          string
 
 	// 多账户:内存里持有全部 OVH 账户副本(启动从 SQLite 加载),
 	// OVH Factory 通过 FindAccount 闭包按 id 查询
@@ -554,7 +554,7 @@ var ErrQueueNotFound = errors.New("任务不存在")
 var ErrQueueNotEditable = errors.New("请先暂停任务再修改；已完成的任务不能修改")
 
 // UpdateQueueItem 仅编辑暂停/失败任务,落库成功后才发布新配置。
-func (s *State) UpdateQueueItem(id, datacenter string, options []string, retryInterval int, coupon string, duration *string) error {
+func (s *State) UpdateQueueItem(id, datacenter string, options []string, retryInterval int, coupon string, duration *string, payment ...bool) error {
 	if err := s.SaveBlocked("queue"); err != nil {
 		return err
 	}
@@ -581,6 +581,12 @@ func (s *State) UpdateQueueItem(id, datacenter string, options []string, retryIn
 			next[i].Duration = selected
 		}
 		next[i].Coupon = coupon
+		if len(payment) > 0 {
+			next[i].AutoPay = payment[0]
+		}
+		if len(payment) > 1 {
+			next[i].CouponFallback = payment[0] && payment[1]
+		}
 		next[i].Status = "paused"
 		next[i].FailureCount = 0
 		next[i].LastCheckTime = 0

@@ -52,7 +52,9 @@ type Outcome struct {
 	Cancelled bool
 	// PauseTask:结账登记或响应无法确认,暂停任务等人工核对。
 	// 不计 FailureCount(不是确定性失败);不发 Fatal(用户确认无单后可恢复)
-	PauseTask        bool
+	PauseTask bool
+	// PauseReason distinguishes a rejected coupon policy from an uncertain checkout.
+	PauseReason      string
 	RetryImmediately bool
 	// RetrySoon 非零时把下一次重试提前到这个间隔内(仍可被库存/报价信号更早唤醒)
 	RetrySoon time.Duration
@@ -442,7 +444,7 @@ func PurchaseServer(ctx context.Context, state *app.State, item *types.QueueItem
 			recordFailureStatus(state, item, "结账请求未发出但登记未能清除,请人工核对: "+releaseErr.Error(), "uncertain")
 			return Outcome{PauseTask: true}
 		}
-		if call, prepErr := ovh.PreparePost(cart.client, "/order/cart/"+cart.id+"/checkout", checkoutPayload()); prepErr == nil && time.Now().Before(cart.expires) {
+		if call, prepErr := ovh.PreparePost(cart.client, "/order/cart/"+cart.id+"/checkout", checkoutPayload(item.AutoPay)); prepErr == nil && time.Now().Before(cart.expires) {
 			cart.call = call
 			session.cart = cart
 		} else {
@@ -1005,11 +1007,14 @@ func backfillOrderDetail(state *app.State, client *ovhsdk.Client, taskID, orderI
 // 措辞错一个字用户就可能少付一笔钱或者多买一台。要能单独看、单独测。
 //
 // 关键在于"成功"两个字的真实语义:checkout 返回订单号就算成功,
-// 但订单是**未付款**的,逾期会自动作废。不把这句写出来,
+// 默认仅创建订单；即使启用自动付款，也不能把请求当成扣款成功。
 // 用户看到 🎉 就睡了,第二天机器没了还以为是我们没抢到。
 func BuildOrderSuccessMessage(item *types.QueueItem, orderID, managerURL string) string {
 	payNote := "⚠️ 订单尚未付款：请尽快打开订单链接完成付款,逾期未付订单会自动作废。\n" +
 		"(撤回资格与退款金额以 OVH 订单页面显示为准)\n"
+	if item.AutoPay {
+		payNote = "💳 已请求用账户默认支付方式自动付款，请打开订单链接核对扣款是否成功。\n(撤回资格与退款金额以 OVH 订单页面显示为准)\n"
+	}
 	// 发控制面板深链,不发 checkout 返回的那个 url ——
 	// 后者是带凭证的下载链接(OVH 的 billing.Order 里 url 旁边就是 password),
 	// 而这条消息会进 Telegram 群和用户配的任意 webhook。

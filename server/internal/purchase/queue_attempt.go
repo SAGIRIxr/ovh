@@ -99,11 +99,15 @@ func runQueueAttempt(ctx context.Context, state *app.State, it types.QueueItem, 
 			}
 		}
 		state.QueueMu.Unlock()
-		if outcome.Reason != "" {
+		if outcome.Reason != "" && outcome.PauseReason == "" {
 			recordFailureStatus(state, &snapshot, outcome.Reason, "uncertain")
 		}
 		_ = state.SaveQueue()
-		state.Logger.Info("任务已暂停(结账结果不确定,等人工确认): "+it.PlanCode, "queue")
+		reason := outcome.PauseReason
+		if reason == "" {
+			reason = "结账结果不确定，等人工确认"
+		}
+		state.Logger.Info("任务已暂停("+reason+"): "+it.PlanCode, "queue")
 		return outcome
 	}
 	if outcome.Cancelled {

@@ -20,7 +20,8 @@ func orderOptionsKey(options []string) string {
 }
 
 // EnqueueMonitorOrders 接收监控已验价的配置,直接持久化整批任务,省掉本地 HTTP 和重复验价。
-func (s *State) EnqueueMonitorOrders(account, plan string, dcs, options []string, quantity int, duration string) error {
+func (s *State) EnqueueMonitorOrders(account, plan string, dcs, options []string, quantity int, duration string, payment ...bool) error {
+	autoPay := len(payment) > 0 && payment[0]
 	if _, ok := s.FindAccount(account); !ok || account == "" {
 		return fmt.Errorf("monitor order account is missing")
 	}
@@ -61,7 +62,7 @@ func (s *State) EnqueueMonitorOrders(account, plan string, dcs, options []string
 	now := types.NowISO()
 	for _, dc := range dcs {
 		for i := 0; i < quantity; i++ {
-			items = append(items, types.QueueItem{ID: uuid.NewString(), AccountID: account, PlanCode: plan, Datacenter: dc, Options: append([]string(nil), options...), Status: "running", Duration: duration, MaxRetries: 20, RetryInterval: s.Config.QuickOrderRetryInterval(), CreatedAt: now, UpdatedAt: now, QuickOrder: true, Priority: 100})
+			items = append(items, types.QueueItem{ID: uuid.NewString(), AccountID: account, PlanCode: plan, Datacenter: dc, Options: append([]string(nil), options...), Status: "running", AutoPay: autoPay, Duration: duration, MaxRetries: 20, RetryInterval: s.Config.QuickOrderRetryInterval(), CreatedAt: now, UpdatedAt: now, QuickOrder: true, Priority: 100})
 		}
 	}
 	// 原有持久暂停/停止闸门和数据库失败回滚都在这个共同入口,不得绕开。

@@ -30,7 +30,16 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 		status                               int
 		preorder, cancel, uncertain, network bool
 		checkout, warning                    bool
+		autoPay, fallback, pause             bool
 	}{
+		{name: "auto-pay accepted", coupon: "Save10", status: 200, checkout: true, autoPay: true},
+		{name: "auto-pay rejected pauses", coupon: "Save10", status: 400, autoPay: true, pause: true},
+		{name: "auto-pay forbidden pauses", coupon: "Save10", status: 403, autoPay: true, pause: true},
+		{name: "auto-pay rejected explicit fallback", coupon: "Save10", status: 400, autoPay: true, fallback: true, checkout: true, warning: true},
+		{name: "preorder auto-pay rejected pauses", coupon: "Save10", status: 400, autoPay: true, preorder: true, pause: true},
+		{name: "preorder auto-pay explicit fallback", coupon: "Save10", status: 400, autoPay: true, fallback: true, preorder: true, checkout: true, warning: true},
+		{name: "auto-pay uncertain with fallback", coupon: "Save10", status: 400, autoPay: true, fallback: true, checkout: true, warning: true, uncertain: true},
+		{name: "auto-pay rate limit never falls back", coupon: "Save10", status: 429, autoPay: true, fallback: true},
 		{name: "blank", coupon: "  ", checkout: true},
 		{name: "accepted", coupon: " Save10 ", status: 200, checkout: true},
 		{name: "preorder", coupon: "Save10", status: 200, preorder: true, checkout: true},
@@ -144,7 +153,7 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatal(err)
 					}
-					if payload["autoPayWithPreferredPaymentMethod"] != false {
+					if payload["autoPayWithPreferredPaymentMethod"] != tc.autoPay {
 						t.Error("coupon changed auto-pay default")
 					}
 					body = `{"orderId":123}`
@@ -165,7 +174,7 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 				t.Fatal(err)
 			}
 			client.Client = &http.Client{Transport: transport}
-			item := &types.QueueItem{ID: "coupon-task", AccountID: "eu", PlanCode: "24sk202", Datacenter: "gra", Coupon: tc.coupon, Preorder: tc.preorder}
+			item := &types.QueueItem{ID: "coupon-task", AccountID: "eu", PlanCode: "24sk202", Datacenter: "gra", AutoPay: tc.autoPay, CouponFallback: tc.fallback, Coupon: tc.coupon, Preorder: tc.preorder}
 			outcome := PurchaseServer(ctx, st, item)
 			wantCoupon := 1
 			if strings.TrimSpace(tc.coupon) == "" {
@@ -175,7 +184,7 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 			if tc.checkout {
 				wantCheckout = 1
 			}
-			if couponCalls != wantCoupon || checkoutCalls != wantCheckout || outcome.Success != (tc.checkout && !tc.uncertain) || outcome.PauseTask != tc.uncertain || outcome.Attempted || outcome.Cancelled != tc.cancel {
+			if couponCalls != wantCoupon || checkoutCalls != wantCheckout || outcome.Success != (tc.checkout && !tc.uncertain) || outcome.PauseTask != (tc.uncertain || tc.pause) || outcome.Attempted || outcome.Cancelled != tc.cancel {
 				t.Fatalf("unexpected flow: outcome=%+v coupon=%d checkout=%d steps=%v", outcome, couponCalls, checkoutCalls, steps)
 			}
 			if tc.uncertain {

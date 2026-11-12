@@ -483,6 +483,7 @@ func (m *Monitor) CheckAvailabilityChange(sub *Subscription, traceID string) {
 		priceCfg := copyMap(configInfo)
 		priceCfg["account_id"] = choice.accountID
 		priceCfg["duration"] = cfg.Duration
+		priceCfg["autoPay"] = cfg.AutoPay
 
 		type dcStatus struct {
 			status    string
@@ -533,7 +534,7 @@ func (m *Monitor) CheckAvailabilityChange(sub *Subscription, traceID string) {
 				go func(dc string) {
 					defer wg.Done()
 					defer func() { <-sem }()
-					ready := m.state.OrderPrewarm != nil && m.state.OrderPrewarm.Ready(types.QueueItem{AccountID: choice.accountID, PlanCode: planCode, Datacenter: dc, Options: effectiveOptions, Duration: cfg.Duration})
+					ready := m.state.OrderPrewarm != nil && m.state.OrderPrewarm.Ready(types.QueueItem{AccountID: choice.accountID, PlanCode: planCode, Datacenter: dc, Options: effectiveOptions, AutoPay: cfg.AutoPay, Duration: cfg.Duration})
 					ok, errMsg, transient := true, "", false
 					if !ready {
 						ok, errMsg, transient = m.verifyPriceAvailable(planCode, dc, priceCfg)

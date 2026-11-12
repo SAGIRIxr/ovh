@@ -545,6 +545,7 @@ func finishWatchFlow(state *app.State, mon *monitor.Monitor, f *watchFlow, quant
 		}
 	}
 
+	// autoPay 恒 false：自动付款是要用户显式打开的开关，不能在几下点击里替他决定。
 	mon.AddSubscription(f.PlanCode, f.DCs, true, false, "", nil, nil,
 		autoOrder, quantity, accountID, f.PickedOptions, "")
 	if _, err := persistMonitorChanges(mon); err != nil {
