@@ -22,6 +22,7 @@ export interface QueueItem {
   coupon?: string;
   duration?: string;
   preorder?: boolean;
+  preorderWaitStock?: boolean;
   /** 强制入队:型号还没上架也一直刷 */
   force?: boolean;
   /** 锁定的整套硬件组合,只在这条 FQN 有货时下单 */
@@ -272,6 +273,7 @@ export function useCopyQueueItems() {
               options: it.options || [],
               autoPay: payload.keepAutoPay && !!it.autoPay,
               preorder: !!it.preorder,
+              preorderWaitStock: !!it.preorder && !!it.preorderWaitStock,
               force: !!it.force,
               coupon: it.coupon || undefined,
               couponFallback: payload.keepAutoPay && !!it.autoPay && !!it.couponFallback,

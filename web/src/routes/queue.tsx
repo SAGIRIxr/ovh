@@ -832,6 +832,7 @@ function CreateQueueDialog({
         touchedRef.current = true;
         // 换了账户就换了钱包:自动付款不跟着复制,要用户自己再勾
         setAutoPay(false);
+        setDuration(copyFrom.duration || "P1M");
         setCoupon(copyFrom.coupon || "");
         setCouponFallback(false);
         if (copyFrom.fqn) {
@@ -848,7 +849,7 @@ function CreateQueueDialog({
     [searchServers, planCode]
   );
   const [preorderPlan, setPreorderPlan] = useState("");
-  const preorder = !!editing?.preorder || !!matchedServer?.prerelease || (!!planCode.trim() && preorderPlan === planCode.trim());
+  const preorder = !!editing?.preorder || (!!copyFrom?.preorder && copyFrom.planCode === planCode.trim()) || !!matchedServer?.prerelease || (!!planCode.trim() && preorderPlan === planCode.trim());
   const purchaseMode: PurchaseMode = editing ? (editing.orderGroup ? "total" : "perDatacenter") : chosenScope || (preorder ? "total" : "perDatacenter");
   useEffect(() => setPreorderPlan((previous) => retainPreorderPlan(previous, planCode.trim(), !!matchedServer?.prerelease)), [planCode, matchedServer?.prerelease]);
 
@@ -1033,6 +1034,7 @@ function CreateQueueDialog({
       coupon,
       duration,
       preorder,
+      preorderWaitStock: preorder && !!copyFrom?.preorderWaitStock && copyFrom.planCode === planCode.trim(),
       purchaseMode,
       // 原任务是强制入队的,复制出来的也强制(型号多半还没上架,不强制会被直接拒)
       force: force || (!!copyFrom?.force && copyFrom.planCode === planCode.trim()),

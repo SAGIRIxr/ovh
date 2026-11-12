@@ -904,6 +904,34 @@ test("a delayed 401 cannot erase a newly entered API key", async () => {
   }
 });
 
+test("copying a queue task keeps period and presale trigger but payment requires opt-in", async () => {
+  const { useCopyQueueItems } = await server.ssrLoadModule("/src/hooks/use-queue.ts");
+  const { api } = await server.ssrLoadModule("/src/lib/api.ts");
+  const client = new QueryClient();
+  const adapter = api.defaults.adapter;
+  const bodies = [];
+  api.defaults.adapter = async (config) => {
+    bodies.push(JSON.parse(config.data));
+    return { data: { count: 1 }, status: 200, statusText: "OK", headers: {}, config };
+  };
+  let mutation;
+  function Probe() { mutation = useCopyQueueItems(); return null; }
+  const item = { id: "source", accountId: "eu", planCode: "plan", datacenter: "gra", options: ["ram-64g"], status: "paused", duration: "P12M", preorder: true, preorderWaitStock: true, autoPay: true, couponFallback: true, coupon: "SAVE", fqn: "plan.ram-64g" };
+  try {
+    renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(Probe)));
+    for (const keepAutoPay of [false, true]) {
+      const result = await mutation.mutateAsync({ items: [item], accountIds: ["eu2"], keepAutoPay, existing: [] });
+      assert.equal(result.created, 1);
+      const body = bodies.at(-1);
+      assert.equal(body.autoPay, keepAutoPay);
+      assert.equal(body.couponFallback, keepAutoPay);
+      assert.equal(body.duration, "P12M");
+      assert.equal(body.preorderWaitStock, true);
+      assert.equal(body.fqn, item.fqn);
+    }
+  } finally { api.defaults.adapter = adapter; client.clear(); }
+});
+
 test("prewarm identity includes account, payment and coupon while normalizing selection order", async () => {
   const { prewarmIdentity } = await server.ssrLoadModule("/src/lib/order-prewarm.ts");
   const request = { account_id: "eu", planCode: "plan", datacenters: ["mum", "bhs"], options: ["ram-32g", "storage"], quantity: 1, coupon: "SAVE", preorder: false };
