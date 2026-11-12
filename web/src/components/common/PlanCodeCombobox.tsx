@@ -53,6 +53,7 @@ export function PlanCodeCombobox({
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
+      <div className="relative">
       <PopoverTrigger asChild>
         <Button
           variant="outline"
@@ -61,6 +62,7 @@ export function PlanCodeCombobox({
           className={cn(
             "w-full justify-between font-normal h-10 px-3.5 rounded-xl",
             !value && "text-muted-foreground",
+            value && "pr-14",
             className
           )}
         >
@@ -74,24 +76,20 @@ export function PlanCodeCombobox({
           ) : (
             <span>{placeholder || t("commons.planCode.placeholder")}</span>
           )}
-          <div className="flex items-center gap-1">
-            {value && (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onChange("");
-                }}
-                className="rounded hover:bg-muted p-0.5"
-                aria-label={t("commons.planCode.clear")}
-              >
-                <X className="w-3.5 h-3.5 text-muted-foreground" />
-              </button>
-            )}
-            <ChevronsUpDown className="w-4 h-4 opacity-50 shrink-0" />
-          </div>
+          <ChevronsUpDown className="absolute right-3.5 w-4 h-4 opacity-50 shrink-0" />
         </Button>
       </PopoverTrigger>
+      {value && (
+        <button
+          type="button"
+          onClick={() => onChange("")}
+          className="absolute right-8 top-1/2 -translate-y-1/2 rounded hover:bg-muted p-1"
+          aria-label={t("commons.planCode.clear")}
+        >
+          <X className="w-3.5 h-3.5 text-muted-foreground" />
+        </button>
+      )}
+      </div>
       <PopoverContent
         className="w-[var(--radix-popover-trigger-width)] p-0"
         sideOffset={4}
