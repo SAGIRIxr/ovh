@@ -55,7 +55,7 @@ func toDBSub(s *Subscription) types.Subscription {
 		AutoOrder:          s.AutoOrder,
 		Quantity:           s.Quantity,
 		AutoOrderAccountID: s.AutoOrderAccountID,
-		AutoPay:            s.AutoPay,
+		Duration:           s.Duration,
 		Paused:             s.Paused,
 		Options:            s.Options,
 	}
@@ -93,7 +93,7 @@ func fromDBSub(s types.Subscription) *Subscription {
 		AutoOrder:          s.AutoOrder,
 		Quantity:           s.Quantity,
 		AutoOrderAccountID: s.AutoOrderAccountID,
-		AutoPay:            s.AutoPay,
+		Duration:           s.Duration,
 		Paused:             s.Paused,
 		Options:            s.Options,
 	}
@@ -143,6 +143,7 @@ func (m *Monitor) LoadFromDB() {
 		interval = ClampCheckInterval(saved)
 	}
 	m.checkInterval = interval
+	m.state.MonitorIntervalSeconds.Store(int64(interval))
 	m.state.Logger.Info(fmt.Sprintf("监控检查间隔: %d 秒", interval), "monitor")
 	m.state.Logger.Info("已加载订阅", "monitor")
 }

@@ -128,8 +128,8 @@ func newPasskeyHarness(t *testing.T) *passkeyHarness {
 	r.POST("/finish-login", PasskeyLoginFinish(s))
 	r.DELETE("/passkeys/:id", DeletePasskey(s))
 	// 每个用例独立的限流状态
-	passkeyLoginLimiter = &ipFailureWindow{max: 10, window: 60e9, lockMs: 300e9}
-	passkeyGlobalLimiter = &globalFailureWindow{max: 60, window: 60e9, lockMs: 60e9}
+	passkeyLoginLimiter = &ipFailureWindow{max: 10, window: 60e9, lockDuration: 300e9}
+	passkeyGlobalLimiter = &globalFailureWindow{max: 60, window: 60e9, lockDuration: 60e9}
 	return &passkeyHarness{t: t, state: s, r: r}
 }
 

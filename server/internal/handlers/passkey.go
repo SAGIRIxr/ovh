@@ -84,8 +84,8 @@ var (
 
 // 登录失败限流:单 IP 10 次 / 分钟,全局 60 次 / 分钟
 var (
-	passkeyLoginLimiter  = &ipFailureWindow{max: 10, window: time.Minute, lockMs: 5 * time.Minute}
-	passkeyGlobalLimiter = &globalFailureWindow{max: 60, window: time.Minute, lockMs: time.Minute}
+	passkeyLoginLimiter  = &ipFailureWindow{max: 10, window: time.Minute, lockDuration: 5 * time.Minute}
+	passkeyGlobalLimiter = &globalFailureWindow{max: 60, window: time.Minute, lockDuration: time.Minute}
 )
 
 func putPasskeyFlow(f passkeyFlow) (string, error) {

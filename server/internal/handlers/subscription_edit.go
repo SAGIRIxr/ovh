@@ -9,6 +9,7 @@ import (
 
 	"github.com/ovh-buy/server/internal/app"
 	"github.com/ovh-buy/server/internal/monitor"
+	"github.com/ovh-buy/server/internal/orderterm"
 	"github.com/ovh-buy/server/internal/ovh"
 	"github.com/ovh-buy/server/internal/types"
 	"github.com/ovh-buy/server/internal/vps"
@@ -40,18 +41,23 @@ func UpdateSubscription(state *app.State, mon *monitor.Monitor) gin.HandlerFunc 
 		}
 
 		var body struct {
+			Duration           *string   `json:"duration"`
 			Datacenters        *[]string `json:"datacenters"`
 			NotifyAvailable    *bool     `json:"notifyAvailable"`
 			NotifyUnavailable  *bool     `json:"notifyUnavailable"`
 			AutoOrder          *bool     `json:"autoOrder"`
 			Quantity           *int      `json:"quantity"`
 			AutoOrderAccountID *string   `json:"autoOrderAccountId"`
-			AutoPay            *bool     `json:"autoPay"`
+			// LegacyAutoPay 旧页面字段,仅为兼容;true 会被拒绝(自动付款功能已删除)
+			LegacyAutoPay *bool `json:"autoPay"`
 			// Options 只盯这套配置。空数组 = 改回"盯全部配置"。
 			Options *[]string `json:"options"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "请求体格式错误: " + err.Error()})
+			return
+		}
+		if rejectAutoPay(c, body.LegacyAutoPay) {
 			return
 		}
 
@@ -63,8 +69,16 @@ func UpdateSubscription(state *app.State, mon *monitor.Monitor) gin.HandlerFunc 
 		autoOrder := cur.AutoOrder
 		quantity := cur.Quantity
 		accountID := cur.AutoOrderAccountID
-		autoPay := cur.AutoPay
 		options := cur.Options
+		duration := cur.Duration
+		if body.Duration != nil {
+			var err error
+			duration, err = orderterm.Normalize(*body.Duration)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+		}
 
 		if body.Datacenters != nil {
 			datacenters = *body.Datacenters
@@ -80,9 +94,6 @@ func UpdateSubscription(state *app.State, mon *monitor.Monitor) gin.HandlerFunc 
 		}
 		if body.Quantity != nil {
 			quantity = *body.Quantity
-		}
-		if body.AutoPay != nil {
-			autoPay = *body.AutoPay
 		}
 		if body.Options != nil {
 			options = *body.Options
@@ -114,7 +125,7 @@ func UpdateSubscription(state *app.State, mon *monitor.Monitor) gin.HandlerFunc 
 		if len(selector) > 0 {
 			originalKey = &selector[0]
 		}
-		if err := mon.UpdateSubscriptionFields(planCode, originalKey, datacenters, notifyAvailable, notifyUnavailable, autoOrder, quantity, accountID, autoPay, options); err != nil {
+		if err := mon.UpdateSubscriptionFields(planCode, originalKey, datacenters, notifyAvailable, notifyUnavailable, autoOrder, quantity, accountID, options, duration); err != nil {
 			status := http.StatusConflict
 			if errors.Is(err, monitor.ErrSubscriptionNotFound) {
 				status = http.StatusNotFound
@@ -122,7 +133,7 @@ func UpdateSubscription(state *app.State, mon *monitor.Monitor) gin.HandlerFunc 
 			c.JSON(status, gin.H{"status": "error", "message": err.Error()})
 			return
 		}
-		if err := mon.SaveToDB(); err != nil {
+		if _, err := persistMonitorChanges(mon); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "本次运行已修改，但未能保存到数据库: " + err.Error()})
 			return
 		}
@@ -151,6 +162,7 @@ func UpdateVPSSubscription(state *app.State) gin.HandlerFunc {
 		id := c.Param("subscription_id")
 
 		var body struct {
+			Duration           *string   `json:"duration"`
 			OvhSubsidiary      *string   `json:"ovhSubsidiary"`
 			Datacenters        *[]string `json:"datacenters"`
 			MonitorLinux       *bool     `json:"monitorLinux"`
@@ -161,10 +173,14 @@ func UpdateVPSSubscription(state *app.State) gin.HandlerFunc {
 			AutoOrder          *bool     `json:"autoOrder"`
 			Quantity           *int      `json:"quantity"`
 			OS                 *string   `json:"os"`
-			AutoPay            *bool     `json:"autoPay"`
+			// LegacyAutoPay 旧页面字段,仅为兼容;true 会被拒绝(自动付款功能已删除)
+			LegacyAutoPay *bool `json:"autoPay"`
 		}
 		if err := c.ShouldBindJSON(&body); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "请求体格式错误: " + err.Error()})
+			return
+		}
+		if rejectAutoPay(c, body.LegacyAutoPay) {
 			return
 		}
 
@@ -186,6 +202,14 @@ func UpdateVPSSubscription(state *app.State) gin.HandlerFunc {
 		}
 
 		next := cur
+		if body.Duration != nil {
+			var err error
+			next.Duration, err = orderterm.Normalize(*body.Duration)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+		}
 		if body.Datacenters != nil {
 			next.Datacenters = *body.Datacenters
 		}
@@ -210,20 +234,17 @@ func UpdateVPSSubscription(state *app.State) gin.HandlerFunc {
 		if body.Quantity != nil {
 			next.Quantity = *body.Quantity
 		}
+		if next.Quantity < 0 || next.Quantity > types.MaxOrderQuantity {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "VPS 下单数量必须在允许的单次上限内"})
+			return
+		}
 		if body.OS != nil {
 			next.OS = strings.TrimSpace(*body.OS)
-		}
-		if body.AutoPay != nil {
-			next.AutoPay = *body.AutoPay
 		}
 		// 没有下单账户就不可能自动下单 —— 让这两个字段自洽,
 		// 否则界面上会出现"开着自动下单但买不了"的状态
 		if next.AutoOrderAccountID == "" {
 			next.AutoOrder = false
-		}
-		// 自动付款依附于自动下单
-		if !next.AutoOrder {
-			next.AutoPay = false
 		}
 		if next.AutoOrder && next.Quantity < 1 {
 			next.Quantity = 1
@@ -289,6 +310,8 @@ func UpdateVPSSubscription(state *app.State) gin.HandlerFunc {
 		}
 		// 拿锁里的当前值做基准,别把并发写进来的 History / LastStatus 覆盖掉
 		live := state.VPSSubscriptions[idx]
+		live.Revision++
+		state.UnregisterTaskCancel("vps:" + id)
 		live.OvhSubsidiary = next.OvhSubsidiary
 		live.Datacenters = next.Datacenters
 		live.MonitorLinux = next.MonitorLinux
@@ -299,14 +322,16 @@ func UpdateVPSSubscription(state *app.State) gin.HandlerFunc {
 		live.AutoOrder = next.AutoOrder
 		live.Quantity = next.Quantity
 		live.OS = next.OS
-		live.AutoPay = next.AutoPay
+		live.Duration = next.Duration
 		if resetStatus {
 			live.LastStatus = map[string]string{}
 		}
 		state.VPSSubscriptions[idx] = live
 		state.VPSSubsMu.Unlock()
 
-		_ = vps.SaveSubscriptions(state)
+		if !saveVPSSubscriptions(c, state) {
+			return
+		}
 		state.Logger.Info("更新VPS订阅配置: "+live.PlanCode+" (subsidiary: "+live.OvhSubsidiary+")", "vps_monitor")
 
 		resp := gin.H{"status": "success", "message": "已更新 " + live.PlanCode, "subscription": live}

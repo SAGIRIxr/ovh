@@ -44,11 +44,26 @@ func handleCommand(state *app.State, mon *monitor.Monitor, chatID interface{}, m
 
 	var reply string
 	switch cmd {
-	case "start", "help", "h", "?":
-		reply = helpText()
+	case "start", "menu", "m":
+		sendMenu(state, mon, chatID, messageID)
+		return true
+	case "help", "h", "?":
+		telegram.SendReply(state, chatID, clampReply(helpText()), messageID)
+		sendMenu(state, mon, chatID, 0)
+		return true
+	case "monitor", "mon":
+		reply = monitorText(state, mon, args)
+	case "speed":
+		reply = speedText(state)
+	case "pauseall":
+		reply = pauseAllText(state)
 	case "status", "s":
 		reply = statusText(state, mon)
 	case "queue", "q":
+		if kb := queueKeyboard(state); kb != nil {
+			telegram.SendKeyboard(state, chatID, messageID, clampReply(queueText(state)), kb)
+			return true
+		}
 		reply = queueText(state)
 	case "cancel":
 		reply = cancelText(state, args)
@@ -58,7 +73,7 @@ func handleCommand(state *app.State, mon *monitor.Monitor, chatID interface{}, m
 		// 带了 x<数量> = 用户明确知道自己要什么,直接建,不打断他。
 		// 否则走按钮流程:让他挑配置和账户 —— 这两件事不挑就等于默默替他决定,
 		// 而它们直接决定会不会抢到、以及会下多少单。
-		if hasExplicitQuantity(args) || len(args) == 0 {
+		if hasExplicitQuantity(args) || len(args) == 0 || hasExplicitDuration(args) {
 			reply = watchText(state, mon, args)
 			// 快捷式建完是"盯全部配置"。addon planCode 二三十字符,打不出来,
 			// 所以紧跟一排按钮让他一键改窄 —— 以前只能删掉订阅重发一次不带 x 的 /watch。
@@ -80,8 +95,16 @@ func handleCommand(state *app.State, mon *monitor.Monitor, chatID interface{}, m
 	case "accounts", "acc":
 		reply = accountsText(state, chatID, messageID)
 	case "subs", "sub":
+		if kb := subsKeyboard(mon); kb != nil {
+			telegram.SendKeyboard(state, chatID, messageID, clampReply(subsText(state, mon)), kb)
+			return true
+		}
 		reply = subsText(state, mon)
 	case "recent", "history":
+		if kb := recentKeyboard(state); kb != nil {
+			telegram.SendKeyboard(state, chatID, messageID, clampReply(recentText(state)), kb)
+			return true
+		}
 		reply = recentText(state)
 	default:
 		reply = "❓ 不认识的命令: /" + cmd + "\n\n发 /help 看能用什么。"
@@ -128,13 +151,17 @@ func helpText() string {
 	b.WriteString("   **按配置逐套**触发的。不挑配置就是每套都要，\n")
 	b.WriteString("   「抢 1 台」会变成「每套配置在每个机房各抢 1 台」。\n\n")
 	b.WriteString("【命令】\n")
+	b.WriteString("  /menu     按钮菜单（总览、任务、订阅、订单、速度、监控开关）\n")
 	b.WriteString("  /status   监控与队列总览\n")
-	b.WriteString("  /queue    正在抢的任务\n")
+	b.WriteString("  /queue    正在抢的任务（可暂停/恢复/删除）\n")
+	b.WriteString("  /pauseall 暂停全部运行中的任务\n")
+	b.WriteString("  /monitor on|off  启动 / 停止监控\n")
+	b.WriteString("  /speed    抢购速度：发现库存到发出结账\n")
 	b.WriteString("  /cancel <任务号|all>  取消任务\n")
 	b.WriteString("  /interval [秒]   看/改新任务的默认重试间隔\n")
-	b.WriteString("  /subs     在盯哪些型号\n")
+	b.WriteString("  /subs     在盯哪些型号（可暂停/恢复/删除）\n")
 	b.WriteString("  /accounts 看/切当前下单账户\n")
-	b.WriteString("  /recent   最近的抢购结果\n\n")
+	b.WriteString("  /recent   最近的抢购结果（未付款订单带订单页链接）\n\n")
 	b.WriteString("💡 上架通知里的按钮可以直接下单，比打字快。\n")
 	b.WriteString("💡 多账户的话先 /accounts 确认当前用的是哪个 —— ")
 	b.WriteString("三个大区的型号代码不一样，选错区永远抢不到。\n")
@@ -267,7 +294,7 @@ func queueText(state *app.State) string {
 			dc = "任意机房"
 		}
 		b.WriteString(fmt.Sprintf("%d. %s @ %s\n", i+1, it.PlanCode, strings.ToUpper(dc)))
-		b.WriteString(fmt.Sprintf("   状态 %s · 每 %d 秒重试", it.Status,
+		b.WriteString(fmt.Sprintf("   %s · 失败后每 %d 秒重试", taskStatusLabel(it),
 			types.ClampRetryInterval(it.RetryInterval, state.Config.RetryInterval())))
 		if it.FailureCount > 0 {
 			b.WriteString(fmt.Sprintf(" · 已失败 %d 次", it.FailureCount))
@@ -277,7 +304,7 @@ func queueText(state *app.State) string {
 		}
 		b.WriteString("\n   取消：/cancel " + shortID(it.ID) + "\n")
 	}
-	b.WriteString("\n全部取消：/cancel all")
+	b.WriteString("\n下面的按钮可暂停/恢复单个任务。全部取消：/cancel all")
 	return b.String()
 }
 
@@ -541,4 +568,42 @@ func dcArgs(args []string) []string {
 		}
 	}
 	return out
+}
+
+func hasExplicitDuration(args []string) bool {
+	for _, arg := range args {
+		a := strings.ToUpper(arg)
+		if strings.HasPrefix(a, "DURATION=") || len(a) > 1 && a[0] == 'P' && a[1] >= '0' && a[1] <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+// taskStatusLabel 把内部状态和阶段翻成人话;预售还区分开售即下/有货再下。
+func taskStatusLabel(it types.QueueItem) string {
+	label := map[string]string{"running": "▶️ 抢购中", "pending": "⏳ 待执行", "paused": "⏸ 已暂停"}[it.Status]
+	if label == "" {
+		label = it.Status
+	}
+	if it.Status == "running" {
+		if phase := map[string]string{
+			"waitingStock":   "等库存",
+			"waitingQuote":   "等官方报价",
+			"waitingBase":    "等主机开售",
+			"waitingOptions": "等所选配置开售",
+			"waitingQuota":   "同组其他任务结账中",
+			"submitting":     "正在结账",
+		}[it.OrderPhase]; phase != "" {
+			label += "（" + phase + "）"
+		}
+	}
+	if it.Preorder {
+		if it.PreorderWaitStock {
+			label += " · 预售有货再下"
+		} else {
+			label += " · 预售开售即下"
+		}
+	}
+	return label
 }

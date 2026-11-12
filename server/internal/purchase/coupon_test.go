@@ -26,25 +26,21 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 	original := http.DefaultTransport
 	t.Cleanup(func() { http.DefaultTransport = original })
 	for _, tc := range []struct {
-		name, coupon                          string
-		status                                int
-		preorder, cancel, reconciled, network bool
-		checkout, warning                     bool
-		autoPay, fallback, pause              bool
+		name, coupon                         string
+		status                               int
+		preorder, cancel, uncertain, network bool
+		checkout, warning                    bool
 	}{
 		{name: "blank", coupon: "  ", checkout: true},
 		{name: "accepted", coupon: " Save10 ", status: 200, checkout: true},
 		{name: "preorder", coupon: "Save10", status: 200, preorder: true, checkout: true},
 		{name: "invalid", coupon: "Save10", status: 400, checkout: true, warning: true},
 		{name: "forbidden", coupon: "Save10", status: 403, checkout: true, warning: true},
-		{name: "reconciled after rejection", coupon: "Save10", status: 400, checkout: true, warning: true, reconciled: true},
+		{name: "uncertain checkout after coupon rejection", coupon: "Save10", status: 400, checkout: true, warning: true, uncertain: true},
 		{name: "rate limited", coupon: "Save10", status: 429},
 		{name: "server error", coupon: "Save10", status: 503},
 		{name: "unrecognized transport error", coupon: "Save10", network: true},
 		{name: "cancelled", coupon: "Save10", cancel: true},
-		// 开了自动付款:优惠码被拒默认暂停,不能悄悄按原价扣钱;勾了「仍付款」才继续结账
-		{name: "auto-pay rejection pauses", coupon: "Save10", status: 400, autoPay: true, pause: true},
-		{name: "auto-pay rejection with fallback", coupon: "Save10", status: 400, autoPay: true, fallback: true, checkout: true, warning: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
@@ -55,11 +51,22 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 			defer database.Close()
 			lg := logger.New(filepath.Join(dir, "test.log"), slog.New(slog.NewTextHandler(io.Discard, nil)))
 			st := app.NewState(storage.Paths{DataDir: dir}, config.New(database), lg, database)
+			defer func() {
+				st.HistoryMu.Lock()
+				ordered := len(st.History) > 0 && st.History[0].Status == "success"
+				st.HistoryMu.Unlock()
+				if ordered {
+					waitWarm(t, func() bool {
+						rows, err := database.ListHistory()
+						return err == nil && len(rows) > 0 && rows[0].OrderStatus != ""
+					})
+				}
+			}()
 			st.Accounts = []types.OVHAccount{{ID: "eu", Endpoint: "ovh-eu", Zone: "PT", AppKey: "test", AppSecret: "test", ConsumerKey: "test"}}
 			cfg := st.Config.Get()
 			cfg.NotifyWebhookURL = "https://coupon-notify.invalid/test"
 			st.Config.Set(cfg)
-			if tc.reconciled {
+			if tc.uncertain {
 				st.History = []types.PurchaseHistoryEntry{{ID: "previous", TaskID: "coupon-task", Status: "failed"}}
 			}
 			ctx, cancel := context.WithCancel(context.Background())
@@ -79,18 +86,30 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 					message, _ := payload["message"].(string)
 					messages = append(messages, message)
 				case strings.HasSuffix(path, "/me/order"):
-					body = `[{"orderId":123,"url":"https://example.invalid/order"}]`
+					body = `[123]`
+				case strings.HasSuffix(path, "/me/order/123/status"):
+					body = `"notPaid"`
+				case strings.HasSuffix(path, "/me/order/123"):
+					body = `{"orderId":123}`
 				case strings.HasSuffix(path, "/auth/time"):
 					body = fmt.Sprint(time.Now().Unix())
 				case strings.Contains(path, "/order/catalog/public/eco"):
-					body = `{"plans":[{"planCode":"24sk202"}]}`
+					body = `{"plans":[{"planCode":"24sk202","configurations":[{"name":"dedicated_datacenter","values":["gra"]}]}]}`
 				case strings.Contains(path, "/dedicated/server/datacenter/availabilities"):
 					body = `[{"fqn":"24sk202","datacenters":[{"datacenter":"gra","availability":"1H-low"}]}]`
 				case strings.HasSuffix(path, "/order/cart") && r.Method == "POST":
 					steps = append(steps, "cart")
 					body = `{"cartId":"coupon-cart"}`
+				case strings.HasSuffix(path, "/order/cart/coupon-cart") && r.Method == "GET":
+					body = `{"items":[1]}`
+				case strings.HasSuffix(path, "/order/cart/coupon-cart/item/1") && r.Method == "GET":
+					body = `{"itemId":1,"duration":"P1M","options":[],"settings":{"planCode":"24sk202"}}`
 				case strings.HasSuffix(path, "/coupon-cart/assign"):
 					steps = append(steps, "assign")
+				case strings.HasSuffix(path, "/coupon-cart/eco") && r.Method == "GET":
+					body = `[{"planCode":"24sk202","prices":[{"duration":"P1M","pricingMode":"default","price":{"value":30,"currencyCode":"EUR"}}]}]`
+				case strings.HasSuffix(path, "/coupon-cart/eco/options") && r.Method == "GET":
+					body = `[]`
 				case strings.HasSuffix(path, "/coupon-cart/eco") && r.Method == "POST":
 					steps = append(steps, "item")
 					body = `{"itemId":1}`
@@ -125,12 +144,11 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 					if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 						t.Fatal(err)
 					}
-					if payload["autoPayWithPreferredPaymentMethod"] != tc.autoPay {
-						t.Error("coupon changed auto-pay setting")
+					if payload["autoPayWithPreferredPaymentMethod"] != false {
+						t.Error("coupon changed auto-pay default")
 					}
-					// No real order; omit ID so the fixture also starts no detail-fetch goroutine.
-					body = `{}`
-					if tc.reconciled {
+					body = `{"orderId":123}`
+					if tc.uncertain {
 						status = http.StatusServiceUnavailable
 						body = `{"message":"checkout timeout"}`
 					}
@@ -147,7 +165,7 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 				t.Fatal(err)
 			}
 			client.Client = &http.Client{Transport: transport}
-			item := &types.QueueItem{ID: "coupon-task", AccountID: "eu", PlanCode: "24sk202", Datacenter: "gra", Coupon: tc.coupon, Preorder: tc.preorder, AutoPay: tc.autoPay, CouponFallback: tc.fallback}
+			item := &types.QueueItem{ID: "coupon-task", AccountID: "eu", PlanCode: "24sk202", Datacenter: "gra", Coupon: tc.coupon, Preorder: tc.preorder}
 			outcome := PurchaseServer(ctx, st, item)
 			wantCoupon := 1
 			if strings.TrimSpace(tc.coupon) == "" {
@@ -157,10 +175,15 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 			if tc.checkout {
 				wantCheckout = 1
 			}
-			if couponCalls != wantCoupon || checkoutCalls != wantCheckout || outcome.Success != tc.checkout || outcome.PauseTask != tc.pause || outcome.Attempted || outcome.Cancelled != tc.cancel {
+			if couponCalls != wantCoupon || checkoutCalls != wantCheckout || outcome.Success != (tc.checkout && !tc.uncertain) || outcome.PauseTask != tc.uncertain || outcome.Attempted || outcome.Cancelled != tc.cancel {
 				t.Fatalf("unexpected flow: outcome=%+v coupon=%d checkout=%d steps=%v", outcome, couponCalls, checkoutCalls, steps)
 			}
-			if tc.checkout {
+			if tc.uncertain {
+				history, err := st.DB.ListHistory()
+				if err != nil || len(history) != 1 || history[0].Status != "uncertain" || history[0].ErrorMessage == nil || !strings.Contains(*history[0].ErrorMessage, "未使用优惠码") {
+					t.Fatal("uncertain checkout lost the coupon warning", history, err)
+				}
+			} else if tc.checkout {
 				history, err := st.DB.ListHistory()
 				if err != nil || len(history) != 1 || history[0].Status != "success" || (history[0].CouponWarning != "") != tc.warning {
 					t.Fatalf("coupon warning not persisted with successful order: %+v %v", history, err)
@@ -171,9 +194,6 @@ func TestPurchaseCouponBeforeCheckout(t *testing.T) {
 				if tc.warning && !strings.Contains(history[0].CouponWarning, "未使用优惠码") {
 					t.Fatal(history[0].CouponWarning)
 				}
-			}
-			if tc.pause && (len(messages) != 1 || !strings.Contains(messages[0], "已暂停")) {
-				t.Fatalf("paused coupon task must notify: %v", messages)
 			}
 			if !tc.checkout && (len(steps) == 0 || steps[len(steps)-1] != "cleanup") {
 				t.Fatalf("failed cart was not cleaned: %v", steps)

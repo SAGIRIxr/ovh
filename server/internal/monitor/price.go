@@ -1,16 +1,16 @@
 package monitor
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
-	"net/http"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/ovh-buy/server/internal/catalog"
 	"github.com/ovh-buy/server/internal/numconv"
+	"github.com/ovh-buy/server/internal/orderterm"
+	"github.com/ovh-buy/server/internal/price"
 )
 
 // optionsFromConfig 取本次配置组合要询价的 addon 列表
@@ -91,11 +91,6 @@ func (m *Monitor) subsidiaryOfPricingAccount(accountID string) string {
 	return catalog.SubsidiaryOfAccount(acc)
 }
 
-// defaultCurrencyForAccount OVH 没回 currencyCode 时,按账户所属子公司兜底。
-func (m *Monitor) defaultCurrencyForAccount(accountID string) string {
-	return currencyForSubsidiary(m.subsidiaryOfPricingAccount(accountID))
-}
-
 // formatMoney 把金额渲染成通知里那一行。
 // $ 家族(USD/CAD/AUD/SGD)必须带国别前缀:光一个 "$" 在同时管着美区账户和
 // 加区账户的监控里是有歧义的,CAD 和 USD 差着三成汇率。
@@ -134,42 +129,48 @@ func formatAmount(currency string, v float64) string {
 	}
 }
 
-// 返回 (是否可下单, 失败原因)
-func (m *Monitor) verifyPriceAvailable(planCode, datacenter string, configInfo map[string]interface{}) (bool, string) {
-	options := optionsFromConfig(configInfo)
+// priceVerifyWait 自动下单前等待价格校验的上限。完整询价要建一辆购物车(十余次串行 OVH 请求),
+// 往返慢时会超过 30 秒;补货窗口里不能为它停住。超时按「没验成」处理,询价在后台继续并缓存结果。
+const priceVerifyWait = 8 * time.Second
 
-	url := "http://127.0.0.1:" + m.state.Port + "/api/internal/monitor/price"
-	body, _ := json.Marshal(map[string]interface{}{
-		"account_id": accountIDFromConfig(configInfo),
-		"plan_code":  planCode,
-		"datacenter": datacenter,
-		"options":    options,
-	})
-	client := &http.Client{Timeout: 30 * time.Second}
-	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", m.state.InternalToken)
-	resp, err := client.Do(req)
-	if err != nil {
-		errMsg := "价格校验API请求失败: " + err.Error()
-		m.state.Logger.Debug(fmt.Sprintf("价格校验API请求失败: %s@%s - %s", planCode, datacenter, err.Error()), "monitor")
-		return false, errMsg
+// lookupPrice 在进程内询价(不再经本地 HTTP),最多等待 wait;超时返回暂时性失败。
+// 结果转成与原 HTTP 响应相同的 map,下游解析不变。
+func (m *Monitor) lookupPrice(planCode, datacenter string, configInfo map[string]interface{}, wait time.Duration) (map[string]interface{}, bool) {
+	duration, _ := configInfo["duration"].(string)
+	fn := m.priceFn
+	if fn == nil {
+		fn = func(accountID, planCode, datacenter string, options []string, duration string) price.Result {
+			return price.GetInternalCached(m.state, accountID, planCode, datacenter, options, duration)
+		}
 	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
+	accountID, options := accountIDFromConfig(configInfo), optionsFromConfig(configInfo)
+	ch := make(chan price.Result, 1)
+	go func() { ch <- fn(accountID, planCode, datacenter, options, duration) }()
+	var r price.Result
+	select {
+	case r = <-ch:
+	case <-time.After(wait):
+		return map[string]interface{}{"success": false, "transient": true,
+			"error": fmt.Sprintf("价格校验超过 %d 秒未完成", int(wait.Seconds()))}, true
+	}
+	raw, _ := json.Marshal(r)
 	var result map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return false, "价格校验API响应解析失败"
-	}
+	_ = json.Unmarshal(raw, &result)
+	return result, r.Transient
+}
 
+// verifyPriceAvailable 返回 (是否可下单, 失败原因, 是否只是暂时没验成)。
+// 暂时性失败(超时、网络、429、5xx)不代表配置不能下单,调用方不应据此跳过自动下单。
+func (m *Monitor) verifyPriceAvailable(planCode, datacenter string, configInfo map[string]interface{}) (bool, string, bool) {
+	result, transient := m.lookupPrice(planCode, datacenter, configInfo, priceVerifyWait)
 	success, _ := result["success"].(bool)
 	if !success {
 		errMsg, _ := result["error"].(string)
 		if errMsg == "" {
 			errMsg = "未知错误"
 		}
-		m.state.Logger.Debug(fmt.Sprintf("价格校验失败: %s@%s - %s", planCode, datacenter, errMsg), "monitor")
-		return false, errMsg
+		m.state.Logger.Debug(fmt.Sprintf("价格校验失败: %s@%s - %s (暂时性=%t)", planCode, datacenter, errMsg, transient), "monitor")
+		return false, errMsg, transient
 	}
 
 	// degraded = 价格算出来了,但购物车没配成用户要的样子(dedicated_os / region 没设上)。
@@ -183,85 +184,70 @@ func (m *Monitor) verifyPriceAvailable(planCode, datacenter string, configInfo m
 		}
 		errMsg := "询价结果降级，无法下单：" + reason
 		m.state.Logger.Debug(fmt.Sprintf("价格校验失败: %s@%s - %s", planCode, datacenter, errMsg), "monitor")
-		return false, errMsg
+		return false, errMsg, false
 	}
 
 	priceRaw, ok := result["price"]
 	if !ok || priceRaw == nil {
 		m.state.Logger.Debug(fmt.Sprintf("价格校验失败: %s@%s - price字段缺失", planCode, datacenter), "monitor")
-		return false, "price字段缺失"
+		return false, "price字段缺失", false
 	}
 	priceInfo, ok := priceRaw.(map[string]interface{})
 	if !ok {
 		m.state.Logger.Debug(fmt.Sprintf("价格校验失败: %s@%s - price字段类型错误", planCode, datacenter), "monitor")
-		return false, "price字段类型错误"
+		return false, "price字段类型错误", false
 	}
 	prices, ok := priceInfo["prices"].(map[string]interface{})
 	if !ok {
 		m.state.Logger.Debug(fmt.Sprintf("价格校验失败: %s@%s - prices字段缺失或类型错误", planCode, datacenter), "monitor")
-		return false, "prices字段缺失或类型错误"
+		return false, "prices字段缺失或类型错误", false
 	}
 	withTax := prices["withTax"]
 	if withTax == nil {
 		errMsg := "withTax无效(<nil>)"
 		m.state.Logger.Debug(fmt.Sprintf("价格校验失败: %s@%s - %s", planCode, datacenter, errMsg), "monitor")
-		return false, errMsg
+		return false, errMsg, false
 	}
-	if v, ok := numconv.ToFloat64(withTax); ok {
-		if v == 0 {
-			m.state.Logger.Debug(fmt.Sprintf("价格校验失败: %s@%s - withTax无效(0)", planCode, datacenter), "monitor")
-			return false, "withTax无效(0)"
-		}
+	if v, ok := numconv.ToFloat64(withTax); !ok || math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 {
+		return false, "withTax不是有效的正数金额", false
 	}
 	m.state.Logger.Debug(fmt.Sprintf("价格校验通过: %s@%s - 含税价格: %v", planCode, datacenter, withTax), "monitor")
-	return true, ""
+	return true, "", false
 }
 
+// GetPriceInfoText 通知里的周期价格文本(不含一次性安装费)。
 func (m *Monitor) GetPriceInfoText(planCode, datacenter string, configInfo map[string]interface{}) string {
+	text, _ := m.priceTexts(planCode, datacenter, configInfo)
+	return text
+}
+
+// priceTexts 返回 (周期价格, 一次性安装费)。周期价格用 summary 拆出的 recurringWithTax;
+// 安装费取同一份 summary,与周期价格同口径(含税)。
+func (m *Monitor) priceTexts(planCode, datacenter string, configInfo map[string]interface{}) (string, string) {
 	options := optionsFromConfig(configInfo)
 
 	m.state.Logger.Debug(fmt.Sprintf("开始获取价格: plan_code=%s, datacenter=%s, options=%v",
 		planCode, datacenter, options), "monitor")
 
-	url := "http://127.0.0.1:" + m.state.Port + "/api/internal/monitor/price"
-	body, _ := json.Marshal(map[string]interface{}{
-		"account_id": accountIDFromConfig(configInfo),
-		"plan_code":  planCode,
-		"datacenter": datacenter,
-		"options":    options,
-	})
-	client := &http.Client{Timeout: 30 * time.Second}
-	req, _ := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Internal-Token", m.state.InternalToken)
-	resp, err := client.Do(req)
-	if err != nil {
-		m.state.Logger.Warn("价格API请求失败: "+err.Error(), "monitor")
-		return ""
-	}
-	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(resp.Body)
-	var result map[string]interface{}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return ""
-	}
+	// 通知里的价格展示:不阻塞自动下单,可以多等一会儿;仍在进程内询价
+	result, _ := m.lookupPrice(planCode, datacenter, configInfo, 30*time.Second)
 	if ok, _ := result["success"].(bool); !ok {
 		errMsg, _ := result["error"].(string)
 		m.state.Logger.Warn("价格获取失败: "+errMsg, "monitor")
-		return ""
+		return "", ""
 	}
 	priceInfo, _ := result["price"].(map[string]interface{})
 	if priceInfo == nil {
-		return ""
+		return "", ""
 	}
 	prices, _ := priceInfo["prices"].(map[string]interface{})
 	if prices == nil {
-		return ""
+		return "", ""
 	}
 	withTaxRaw, ok := prices["withTax"]
 	if !ok || withTaxRaw == nil {
 		m.state.Logger.Warn("价格获取成功但withTax为None", "monitor")
-		return ""
+		return "", ""
 	}
 	accountID := accountIDFromConfig(configInfo)
 	subsidiary := m.subsidiaryOfPricingAccount(accountID)
@@ -283,38 +269,50 @@ func (m *Monitor) GetPriceInfoText(planCode, datacenter string, configInfo map[s
 				planCode, datacenter, strings.ToUpper(currency), subsidiary, want), "monitor")
 		}
 	}
-	if v, ok := numconv.ToFloat64(withTaxRaw); ok {
-		text := formatMoney(currency, v)
-		m.state.Logger.Debug("价格获取成功: "+text, "monitor")
-		return text
+	// summary 的 withTax 是首张账单合计(含安装费);能拆出周期费时只展示周期费
+	amountRaw := withTaxRaw
+	if r, ok := prices["recurringWithTax"]; ok && r != nil {
+		amountRaw = r
 	}
-	return ""
+	setup := ""
+	if s, ok := numconv.ToFloat64(prices["setupWithTax"]); ok && s > 0 {
+		setup = formatAmount(currency, s)
+	}
+	if v, ok := numconv.ToFloat64(amountRaw); ok {
+		text := formatMoney(currency, v)
+		if duration, _ := configInfo["duration"].(string); duration != "" && duration != "P1M" {
+			text = formatAmount(currency, v) + " / " + orderterm.Label(duration)
+		}
+		m.state.Logger.Debug("价格获取成功: "+text, "monitor")
+		return text, setup
+	}
+	return "", ""
 }
 
 // getPriceWithTimeout 带 30 秒超时的询价
-func (m *Monitor) getPriceWithTimeout(planCode, datacenter string, configInfo map[string]interface{}, timeout time.Duration) (string, string) {
+// getPriceWithTimeout 返回 (周期价格, 安装费, 失败说明)。
+func (m *Monitor) getPriceWithTimeout(planCode, datacenter string, configInfo map[string]interface{}, timeout time.Duration) (string, string, string) {
 	type res struct {
-		text   string
-		errMsg string
+		text, setup string
 	}
 	ch := make(chan res, 1)
 	start := time.Now()
 	go func() {
-		text := m.GetPriceInfoText(planCode, datacenter, configInfo)
-		ch <- res{text: text}
+		text, setup := m.priceTexts(planCode, datacenter, configInfo)
+		ch <- res{text: text, setup: setup}
 	}()
 	select {
 	case r := <-ch:
 		if r.text == "" {
 			elapsed := time.Since(start).Seconds()
-			return "", fmt.Sprintf("价格接口未返回结果（耗时%.1f秒）", elapsed)
+			return "", "", fmt.Sprintf("价格接口未返回结果（耗时%.1f秒）", elapsed)
 		}
-		return r.text, ""
+		return r.text, r.setup, ""
 	case <-time.After(timeout):
 		elapsed := time.Since(start).Seconds()
 		errMsg := fmt.Sprintf("价格接口超时（等待%.1f秒）", elapsed)
 		m.state.Logger.Warn("价格获取超时，发送不带价格的通知。后台请求将继续运行直到完成。", "monitor")
-		return "", errMsg
+		return "", "", errMsg
 	}
 }
 

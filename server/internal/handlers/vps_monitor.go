@@ -11,10 +11,20 @@ import (
 
 	"github.com/ovh-buy/server/internal/app"
 	"github.com/ovh-buy/server/internal/notify"
+	"github.com/ovh-buy/server/internal/orderterm"
 	"github.com/ovh-buy/server/internal/ovh"
 	"github.com/ovh-buy/server/internal/types"
 	"github.com/ovh-buy/server/internal/vps"
 )
+
+func saveVPSSubscriptions(c *gin.Context, state *app.State) bool {
+	if err := vps.SaveSubscriptions(state); err != nil {
+		vps.Stop(state)
+		c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "保存配置失败,VPS 监控已停止,请检查存储后重试: " + err.Error()})
+		return false
+	}
+	return true
+}
 
 // GetVPSSubscriptions GET /api/vps-monitor/subscriptions
 func GetVPSSubscriptions(state *app.State) gin.HandlerFunc {
@@ -77,6 +87,7 @@ func AddVPSSubscription(state *app.State) gin.HandlerFunc {
 			return
 		}
 		var body struct {
+			Duration           string   `json:"duration"`
 			PlanCode           string   `json:"planCode"`
 			OvhSubsidiary      string   `json:"ovhSubsidiary"`
 			Datacenters        []string `json:"datacenters"`
@@ -88,9 +99,28 @@ func AddVPSSubscription(state *app.State) gin.HandlerFunc {
 			AutoOrder          bool     `json:"autoOrder"`
 			Quantity           int      `json:"quantity"`
 			OS                 string   `json:"os"`
-			AutoPay            bool     `json:"autoPay"`
+			// LegacyAutoPay 旧页面字段,仅为兼容;true 会被拒绝(自动付款功能已删除)
+			LegacyAutoPay *bool `json:"autoPay"`
 		}
-		_ = c.ShouldBindJSON(&body)
+		if err := c.ShouldBindJSON(&body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "请求参数格式错误"})
+			return
+		}
+		if rejectAutoPay(c, body.LegacyAutoPay) {
+			return
+		}
+		duration, termErr := orderterm.Normalize(body.Duration)
+		if termErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": termErr.Error()})
+			return
+		}
+		body.Duration = duration
+
+		body.PlanCode = strings.TrimSpace(body.PlanCode)
+		if body.Quantity < 0 || body.Quantity > types.MaxOrderQuantity {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "VPS 下单数量必须在允许的单次上限内"})
+			return
+		}
 		if body.PlanCode == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "缺少planCode参数", "code": "E2E02A4EA"})
 			return
@@ -180,6 +210,7 @@ func AddVPSSubscription(state *app.State) gin.HandlerFunc {
 		sub := types.VPSSubscription{
 			ID:                 uuid.NewString(),
 			PlanCode:           body.PlanCode,
+			Duration:           body.Duration,
 			OvhSubsidiary:      body.OvhSubsidiary,
 			Datacenters:        body.Datacenters,
 			MonitorLinux:       monitorLinux,
@@ -193,14 +224,15 @@ func AddVPSSubscription(state *app.State) gin.HandlerFunc {
 			AutoOrder:          body.AutoOrder && body.AutoOrderAccountID != "",
 			Quantity:           body.Quantity,
 			OS:                 strings.TrimSpace(body.OS),
-			AutoPay:            body.AutoPay && body.AutoOrder && body.AutoOrderAccountID != "",
 		}
 		if sub.AutoOrder && sub.Quantity < 1 {
 			sub.Quantity = 1
 		}
 		state.VPSSubscriptions = append(state.VPSSubscriptions, sub)
 		state.VPSSubsMu.Unlock()
-		_ = vps.SaveSubscriptions(state)
+		if !saveVPSSubscriptions(c, state) {
+			return
+		}
 		state.Logger.Info("添加VPS订阅: "+body.PlanCode+" (subsidiary: "+body.OvhSubsidiary+")", "vps_monitor")
 
 		if !vps.Running() {
@@ -226,6 +258,8 @@ func RemoveVPSSubscription(state *app.State) gin.HandlerFunc {
 		for _, s := range state.VPSSubscriptions {
 			if s.ID != id {
 				kept = append(kept, s)
+			} else {
+				state.UnregisterTaskCancel("vps:" + s.ID)
 			}
 		}
 		state.VPSSubscriptions = kept
@@ -236,7 +270,9 @@ func RemoveVPSSubscription(state *app.State) gin.HandlerFunc {
 			c.JSON(http.StatusNotFound, gin.H{"status": "error", "message": "订阅不存在", "code": "E9E5CC314"})
 			return
 		}
-		_ = vps.SaveSubscriptions(state)
+		if !saveVPSSubscriptions(c, state) {
+			return
+		}
 		state.Logger.Info("删除VPS订阅: "+id, "vps_monitor")
 		if empty && vps.Running() {
 			vps.Stop(state)
@@ -251,9 +287,14 @@ func ClearVPSSubscriptions(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		state.VPSSubsMu.Lock()
 		count := len(state.VPSSubscriptions)
+		for _, sub := range state.VPSSubscriptions {
+			state.UnregisterTaskCancel("vps:" + sub.ID)
+		}
 		state.VPSSubscriptions = []types.VPSSubscription{}
 		state.VPSSubsMu.Unlock()
-		_ = vps.SaveSubscriptions(state)
+		if !saveVPSSubscriptions(c, state) {
+			return
+		}
 		state.Logger.Info("清空所有VPS订阅 ("+strconv.Itoa(count)+" 项)", "vps_monitor")
 		if vps.Running() {
 			vps.Stop(state)
@@ -303,7 +344,10 @@ func StartVPSMonitor(state *app.State) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "Telegram 通知未配置或无效,无法启动 VPS 监控:" + reason})
 			return
 		}
-		vps.Start(state)
+		if !vps.Start(state) {
+			c.JSON(http.StatusConflict, gin.H{"status": "error", "message": "VPS 监控未能启动,请检查存储状态或重试"})
+			return
+		}
 		state.Logger.Info("VPS监控已启动", "vps_monitor")
 		c.JSON(http.StatusOK, gin.H{"status": "success", "message": "VPS监控已启动", "code": "E607F9D9A"})
 	}
@@ -312,11 +356,10 @@ func StartVPSMonitor(state *app.State) gin.HandlerFunc {
 // StopVPSMonitor POST /api/vps-monitor/stop
 func StopVPSMonitor(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !vps.Running() {
-			c.JSON(http.StatusOK, gin.H{"status": "info", "message": "VPS监控未运行", "code": "ED35110E9"})
+		if err := vps.StopByUser(state); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"status": "error", "message": "VPS 监控已停止,但停止状态未能保存: " + err.Error()})
 			return
 		}
-		vps.Stop(state)
 		c.JSON(http.StatusOK, gin.H{"status": "success", "message": "VPS监控已停止", "code": "EA025A9CD"})
 	}
 }
@@ -342,7 +385,9 @@ func SetVPSMonitorInterval(state *app.State) gin.HandlerFunc {
 		var body struct {
 			Interval int `json:"interval"`
 		}
-		_ = c.ShouldBindJSON(&body)
+		if !bindOptionalJSON(c, &body) {
+			return
+		}
 		if body.Interval < 60 {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "message": "间隔不能小于60秒", "code": "E7A0F6EA2"})
 			return
@@ -350,7 +395,9 @@ func SetVPSMonitorInterval(state *app.State) gin.HandlerFunc {
 		state.VPSSubsMu.Lock()
 		state.VPSCheckInterval = body.Interval
 		state.VPSSubsMu.Unlock()
-		_ = vps.SaveSubscriptions(state)
+		if !saveVPSSubscriptions(c, state) {
+			return
+		}
 		state.Logger.Info("VPS检查间隔已设置为 "+strconv.Itoa(body.Interval)+" 秒", "vps_monitor")
 		c.JSON(http.StatusOK, gin.H{"status": "success", "message": "检查间隔已设置为 " + strconv.Itoa(body.Interval) + " 秒"})
 	}
@@ -364,7 +411,9 @@ func ManualCheckVPS(state *app.State) gin.HandlerFunc {
 			OvhSubsidiary string `json:"ovhSubsidiary"`
 			AccountID     string `json:"accountId"`
 		}
-		_ = c.ShouldBindJSON(&body)
+		if !bindOptionalJSON(c, &body) {
+			return
+		}
 		// 同 Add:归一化 + 跟账户所在站点兜底,不再写死 IE
 		body.OvhSubsidiary = vps.NormalizeSubsidiary(body.OvhSubsidiary)
 		if body.OvhSubsidiary == "" {

@@ -164,6 +164,27 @@ func handleTelegramCallback(state *app.State, mon *monitor.Monitor, u *updateCtx
 			return
 		}
 	}
+	switch action {
+	case "qt":
+		handleTaskCallback(state, cb, callbackObj, chatID, int64(messageID))
+		u.JSON(http.StatusOK, gin.H{"ok": true, "handled": "queue_task"})
+		return
+	case "m":
+		handleMenuCallback(state, mon, cb, callbackObj, chatID, int64(messageID))
+		u.JSON(http.StatusOK, gin.H{"ok": true, "handled": "menu"})
+		return
+	case "sx":
+		handleActionCallback(state, mon, cb, callbackObj, chatID, int64(messageID))
+		u.JSON(http.StatusOK, gin.H{"ok": true, "handled": "action"})
+		return
+	case "qa":
+		answer := pauseAllText(state)
+		telegram.AnswerCallback(state, idToString(cb["id"]), "", false)
+		text, kb := menuPage(state, mon, "queue")
+		telegram.EditMessage(state, chatID, int64(messageID), clampReply(answer+"\n\n"+text), kb)
+		u.JSON(http.StatusOK, gin.H{"ok": true, "handled": "pause_all"})
+		return
+	}
 	if action != "add_to_queue" {
 		state.Logger.Warn("未知的action: "+action, "telegram")
 		u.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "Unknown action: " + action})
@@ -193,6 +214,7 @@ func handleTelegramCallback(state *app.State, mon *monitor.Monitor, u *updateCtx
 	// btnAccountID:发通知时记下的「触发订阅所用账户」。planCode 是分区的,
 	// 用它下单才不会把欧区机型落到美区账户上。空 = 老按钮/无账户维度 → 退回默认账户。
 	btnAccountID := ""
+	duration := ""
 	var options []string
 	if optsRaw, ok := callbackObj["o"]; ok {
 		options = toStringSlice(optsRaw)
@@ -221,6 +243,10 @@ func handleTelegramCallback(state *app.State, mon *monitor.Monitor, u *updateCtx
 			planCode = row.PlanCode
 			dc = row.Datacenter
 			options = db.ParseTelegramButtonOptions(row.Options)
+			var config map[string]interface{}
+			if json.Unmarshal([]byte(row.ConfigInfo), &config) == nil {
+				duration, _ = config["duration"].(string)
+			}
 			btnAccountID = strings.TrimSpace(row.AccountID)
 			state.Logger.Info(fmt.Sprintf("✅ 按钮已认领: id=%s, %s@%s, options=%v, account=%s",
 				buttonID, planCode, dc, options, btnAccountID), "telegram")
@@ -248,6 +274,7 @@ func handleTelegramCallback(state *app.State, mon *monitor.Monitor, u *updateCtx
 				planCode = cached.PlanCode
 				dc = cached.Datacenter
 				options = cached.Options
+				duration, _ = cached.ConfigInfo["duration"].(string)
 				state.Logger.Info("从内存缓存恢复按钮配置（旧按钮）: "+buttonID, "telegram")
 			} else {
 				// 库里没有、内存缓存也没有 → 拒绝。
@@ -318,6 +345,7 @@ func handleTelegramCallback(state *app.State, mon *monitor.Monitor, u *updateCtx
 		ID:            uuid.NewString(),
 		AccountID:     accountID,
 		PlanCode:      planCode,
+		Duration:      duration,
 		Datacenter:    dc,
 		Options:       options,
 		Status:        "running",
@@ -412,6 +440,11 @@ func handleTelegramMessage(state *app.State, mon *monitor.Monitor, u *updateCtx,
 		u.JSON(http.StatusOK, gin.H{"ok": true})
 		return
 	}
+	if orderInfo.Error != "" {
+		telegram.SendReply(state, chatID, orderInfo.Error, int64(messageID))
+		u.JSON(http.StatusOK, gin.H{"ok": true})
+		return
+	}
 	state.Logger.Info(fmt.Sprintf("解析下单消息: planCode=%s, datacenter=%s, quantity=%d, options=%v",
 		orderInfo.PlanCode, orderInfo.Datacenter, orderInfo.Quantity, orderInfo.Options), "telegram")
 	// —— 账户怎么定 ——
@@ -448,7 +481,6 @@ func handleTelegramMessage(state *app.State, mon *monitor.Monitor, u *updateCtx,
 	}
 	askOrderConfirm(state, chatID, int64(messageID), orderInfo, ra, alt)
 	u.JSON(http.StatusOK, gin.H{"ok": true, "handled": "order_confirm"})
-	return
 }
 
 // parseUpdateID 从 update JSON 里取 update_id（JSON 数字解出来可能是 float64 / json.Number）

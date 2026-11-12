@@ -2,6 +2,7 @@ package monitor
 
 import (
 	"fmt"
+	"github.com/ovh-buy/server/internal/price"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,7 +12,9 @@ import (
 
 // Monitor 服务器补货监控器
 type Monitor struct {
-	state *app.State
+	// priceFn 询价实现;nil 时在进程内调用 price.GetInternalCached。仅测试注入。
+	priceFn func(accountID, planCode, datacenter string, options []string, duration string) price.Result
+	state   *app.State
 
 	subsMu        sync.Mutex
 	subscriptions []*Subscription
@@ -41,7 +44,6 @@ type Monitor struct {
 
 	running       bool
 	checkInterval int // 检查间隔(秒),可配,见 SetCheckInterval
-	thread        *sync.WaitGroup
 	maxWorkers    int
 
 	// Options 缓存（旧机制，兼容性保留）
@@ -85,6 +87,7 @@ type CachedMessage struct {
 // 检查 goroutine 在锁外写 LastCheck*/History/LastStatus,而 HTTP 侧的 Status()/Snapshot()
 // 同时在读同一批字段,go test -race 会直接报 DATA RACE(见 race_test.go)。
 type Subscription struct {
+	Duration string `json:"duration,omitempty"`
 	// mu 保护下面所有可变字段。加在结构体里而不是复用 subsMu:
 	// 检查是「每订阅一个 goroutine」并发跑的,用一把全局锁会让 30 个订阅的检查串行化。
 	mu       sync.Mutex
@@ -101,7 +104,6 @@ type Subscription struct {
 	AutoOrder          bool              `json:"autoOrder,omitempty"`
 	Quantity           int               `json:"quantity,omitempty"`
 	AutoOrderAccountID string            `json:"autoOrderAccountId,omitempty"` // 空 = 触发时只通知不下单
-	AutoPay            bool              `json:"autoPay,omitempty"`            // 下单后自动付款(显式开关,默认关)
 	// Paused 暂停监控:检查循环跳过,订阅与历史保留,恢复即继续。
 	// 场景:暂时不想收通知但不想删掉重建(OVH US 已下线手动续费,删了重加门槛更高)
 	Paused bool `json:"paused,omitempty"`
@@ -133,6 +135,7 @@ type Subscription struct {
 // 期间用户可能改订阅配置,半程换配置会让状态机前后不一致(比如前半程按"通知有货"、
 // 后半程按"不通知"走),而且每次读都要加锁。
 type subCheckConfig struct {
+	Duration           string
 	Revision           uint64
 	Paused             bool
 	Datacenters        []string
@@ -142,7 +145,6 @@ type subCheckConfig struct {
 	AutoOrder          bool
 	Quantity           int
 	AutoOrderAccountID string
-	AutoPay            bool
 	Options            []string
 }
 
@@ -164,7 +166,7 @@ func (s *Subscription) checkConfig() subCheckConfig {
 		AutoOrder:          s.AutoOrder,
 		Quantity:           s.Quantity,
 		AutoOrderAccountID: s.AutoOrderAccountID,
-		AutoPay:            s.AutoPay,
+		Duration:           s.Duration,
 	}
 }
 
@@ -278,7 +280,7 @@ func (s *Subscription) snapshot() *Subscription {
 		AutoOrder:          s.AutoOrder,
 		Quantity:           s.Quantity,
 		AutoOrderAccountID: s.AutoOrderAccountID,
-		AutoPay:            s.AutoPay,
+		Duration:           s.Duration,
 		Paused:             s.Paused,
 
 		LastCheckAt:         s.LastCheckAt,
@@ -400,6 +402,7 @@ func (m *Monitor) SetCheckInterval(v int) int {
 	m.subsMu.Lock()
 	m.checkInterval = v
 	m.subsMu.Unlock()
+	m.state.MonitorIntervalSeconds.Store(int64(v))
 	m.state.Logger.Info(fmt.Sprintf("监控检查间隔已设置为 %d 秒", v), "monitor")
 	return v
 }

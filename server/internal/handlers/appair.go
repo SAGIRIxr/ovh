@@ -25,28 +25,28 @@ import (
 
 // pairFailureLimiter 配对码暴力尝试的限流(独立于 auth 的密钥限流,
 // 那个在鉴权中间件里、而 /api/app/pair 在白名单中不走那套)
-var pairFailureLimiter = &ipFailureWindow{max: 5, window: time.Minute, lockMs: 5 * time.Minute}
+var pairFailureLimiter = &ipFailureWindow{max: 5, window: time.Minute, lockDuration: 5 * time.Minute}
 
 // pairGlobalLimiter 全局失败闸:按 IP 的限流挡单点撞库,这里挡分布式 ——
 // 攻击者换一排 IP 各试 4 次(躲开单 IP 阈值)照样能在 2 分钟窗口内扫掉可观空间。
 // 任何来源的兑换失败都计入:每分钟全局最多 30 次失败,超了整个接口锁 1 分钟。
 // 正常用户不可能触发:一次配对就是一次兑换,失败重试也是个位数。
-var pairGlobalLimiter = &globalFailureWindow{max: 30, window: time.Minute, lockMs: time.Minute}
+var pairGlobalLimiter = &globalFailureWindow{max: 30, window: time.Minute, lockDuration: time.Minute}
 
 // globalFailureWindow 全局(跨来源)失败计数 + 锁定
 type globalFailureWindow struct {
-	max     int
-	window  time.Duration
-	lockMs  time.Duration
-	mu      sync.Mutex
-	fails   []time.Time
-	blocked time.Time
+	max          int
+	window       time.Duration
+	lockDuration time.Duration
+	mu           sync.Mutex
+	fails        []time.Time
+	blocked      time.Time
 }
 
 func (w *globalFailureWindow) allow() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	if time.Since(w.blocked) < w.lockMs {
+	if time.Since(w.blocked) < w.lockDuration {
 		return false
 	}
 	now := time.Now()
@@ -72,12 +72,12 @@ func (w *globalFailureWindow) fail() {
 
 // ipFailureWindow 简单的按 IP 失败计数(与 auth.MaxAuthFailures 同思路,独立实例化)
 type ipFailureWindow struct {
-	max     int
-	window  time.Duration
-	lockMs  time.Duration
-	mu      sync.Mutex
-	fails   map[string][]time.Time
-	blocked map[string]time.Time
+	max          int
+	window       time.Duration
+	lockDuration time.Duration
+	mu           sync.Mutex
+	fails        map[string][]time.Time
+	blocked      map[string]time.Time
 }
 
 // allow 该 IP 当前是否放行
@@ -89,7 +89,7 @@ func (w *ipFailureWindow) allow(ip string) bool {
 		w.blocked = map[string]time.Time{}
 	}
 	if until, ok := w.blocked[ip]; ok {
-		if time.Since(until) < w.lockMs {
+		if time.Since(until) < w.lockDuration {
 			return false
 		}
 		delete(w.blocked, ip)
@@ -105,7 +105,7 @@ func (w *ipFailureWindow) allow(ip string) bool {
 	return true
 }
 
-// fail 记一次失败;达到 max 后锁 lockMs
+// fail 记一次失败;达到 max 后锁 lockDuration
 func (w *ipFailureWindow) fail(ip string) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -200,9 +200,9 @@ func RedeemPairingCode(state *app.State) gin.HandlerFunc {
 			Code       string `json:"code"`
 			DeviceName string `json:"deviceName"`
 		}
-		// 免鉴权接口:请求体封顶 4 KiB(码 + 60 字设备名绰绰有余),不让人塞几 MB 进来解析
-		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4<<10)
-		_ = c.ShouldBindJSON(&body)
+		if !bindOptionalJSON(c, &body) {
+			return
+		}
 		code := strings.ToUpper(strings.TrimSpace(body.Code))
 		if code == "" {
 			// 空码 / 畸形 JSON 也算一次失败,否则可以无限次白打这个接口

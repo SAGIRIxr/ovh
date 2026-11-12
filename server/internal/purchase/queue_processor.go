@@ -121,8 +121,10 @@ func ProcessQueueLoop(state *app.State) {
 // processQueueLoop 为每个任务维护独立 worker,慢查询/落库/通知不再挡住其它机房。
 func processQueueLoop(loopCtx context.Context, state *app.State, purchase func(context.Context, *app.State, *types.QueueItem) Outcome) {
 	ctx, cancel := context.WithCancel(loopCtx)
+	sales := newSaleWatcher(ctx, state)
+	stocks := newStockWatcher(ctx, state)
 	var wg sync.WaitGroup
-	defer func() { cancel(); wg.Wait() }()
+	defer func() { cancel(); sales.close(); stocks.close(); wg.Wait() }()
 	wg.Add(1)
 	go func() { defer wg.Done(); transportWarmLoop(ctx, state) }()
 	type worker struct {
@@ -194,7 +196,10 @@ func processQueueLoop(loopCtx context.Context, state *app.State, purchase func(c
 					defer wg.Done()
 					defer close(done)
 					defer stop()
-					taskWorker(workerCtx, state, item, purchase)
+					if !item.Preorder || item.PreorderWaitStock {
+						defer stocks.subscribe(stockWatchAccount(state, item.AccountID), item.PlanCode)()
+					}
+					taskWorker(workerCtx, state, item, purchase, sales)
 				}(item)
 			}
 		} else {
@@ -211,8 +216,16 @@ func processQueueLoop(loopCtx context.Context, state *app.State, purchase func(c
 	}
 }
 
+// stockWatchAccount 与 taskWorker 使用同一个解析后的账户 ID 订阅信号。
+func stockWatchAccount(state *app.State, account string) string {
+	if acc, ok := state.FindAccount(account); ok {
+		return acc.ID
+	}
+	return account
+}
+
 // taskWorker 的直接信箱可以在重试定时器之前唤醒已预装的无货任务。
-func taskWorker(ctx context.Context, state *app.State, item types.QueueItem, purchase func(context.Context, *app.State, *types.QueueItem) Outcome) {
+func taskWorker(ctx context.Context, state *app.State, item types.QueueItem, purchase func(context.Context, *app.State, *types.QueueItem) Outcome, sales *saleWatcher) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	session := &cartSession{}
@@ -223,6 +236,12 @@ func taskWorker(ctx context.Context, state *app.State, item types.QueueItem, pur
 	}
 	signals, unsubscribe := state.StockSignals.Subscribe(account, item.PlanCode)
 	defer unsubscribe()
+	var saleChanges <-chan struct{}
+	if item.Preorder {
+		var stop func()
+		saleChanges, stop = sales.subscribe(account, item.PlanCode, item.Duration)
+		defer stop()
+	}
 	state.QueueMu.Lock()
 	if ctx.Err() != nil {
 		state.QueueMu.Unlock()
@@ -254,15 +273,33 @@ func taskWorker(ctx context.Context, state *app.State, item types.QueueItem, pur
 			return
 		}
 		attemptCtx := ctx
+		if current.Preorder {
+			attemptCtx = context.WithValue(attemptCtx, saleSignalKey{}, sales.latest(account, current.PlanCode))
+		}
 		if signal != nil {
-			attemptCtx = context.WithValue(ctx, stockSignalKey{}, *signal)
+			attemptCtx = context.WithValue(attemptCtx, stockSignalKey{}, *signal)
 			signal = nil
 		}
 		outcome := runQueueAttempt(attemptCtx, state, *current, purchase)
-		if outcome.Success || outcome.Fatal || outcome.PauseTask || outcome.Cancelled {
+		if outcome.Success || outcome.Fatal || outcome.PauseTask || outcome.Cancelled || outcome.GroupStopped != "" {
 			return
 		}
+		if outcome.RetryImmediately {
+			continue
+		}
 		interval := time.Duration(types.ClampRetryInterval(current.RetryInterval, state.Config.RetryInterval())) * time.Second
+		if outcome.WaitingForCatalog && interval > catalog.PreorderCheckInterval {
+			interval = catalog.PreorderCheckInterval
+		}
+		if outcome.WaitingForQuota {
+			interval = 2 * time.Second
+		}
+		if outcome.RetryAfter > interval {
+			interval = outcome.RetryAfter
+		}
+		if outcome.RetrySoon > 0 && outcome.RetrySoon < interval {
+			interval = outcome.RetrySoon
+		}
 		timer := time.NewTimer(interval)
 		waiting := true
 		for waiting {
@@ -272,10 +309,19 @@ func taskWorker(ctx context.Context, state *app.State, item types.QueueItem, pur
 				return
 			case <-timer.C:
 				waiting = false
-			case observed := <-signals:
-				if outcome.WaitingForStock && stockSignalOrderable(observed, *current) && time.Since(observed.DetectedAt) < time.Second {
+			case <-saleChanges:
+				if outcome.WaitingForCatalog || outcome.WaitingForStock {
 					timer.Stop()
-					signal = &observed
+					waiting = false
+				}
+			case observed := <-signals:
+				if outcome.WaitingForStock && stockSignalOrderable(observed, *current) {
+					timer.Stop()
+					// 任务忙于建车时收到的信号可能已超过 1 秒:不再丢弃,立即唤醒并重新查库存,
+					// 只有新鲜信号才直接复用,避免按陈旧库存结账。
+					if time.Since(observed.DetectedAt) < time.Second {
+						signal = &observed
+					}
 					waiting = false
 				}
 			}

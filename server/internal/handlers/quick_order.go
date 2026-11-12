@@ -12,8 +12,10 @@ import (
 	"github.com/ovh-buy/server/internal/app"
 	"github.com/ovh-buy/server/internal/catalog"
 	"github.com/ovh-buy/server/internal/numconv"
+	"github.com/ovh-buy/server/internal/orderterm"
 	"github.com/ovh-buy/server/internal/ovh"
 	"github.com/ovh-buy/server/internal/price"
+	"github.com/ovh-buy/server/internal/purchase"
 	"github.com/ovh-buy/server/internal/types"
 )
 
@@ -26,20 +28,31 @@ var quickOrderMu sync.Mutex
 func QuickOrder(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var body struct {
+			Duration           string   `json:"duration"`
 			AccountID          string   `json:"account_id"` // 必填,哪个账户下单
 			PlanCode           string   `json:"planCode"`
 			Datacenter         string   `json:"datacenter"`
 			Options            []string `json:"options"`
 			FromMonitor        bool     `json:"fromMonitor"`
 			SkipDuplicateCheck bool     `json:"skipDuplicateCheck"`
-			AutoPay            bool     `json:"autoPay"`
-			Coupon             string   `json:"coupon"`
-			CouponFallback     bool     `json:"couponFallback"`
+			// LegacyAutoPay 旧页面字段,仅为兼容;true 会被拒绝(自动付款功能已删除)
+			LegacyAutoPay *bool  `json:"autoPay"`
+			Coupon        string `json:"coupon"`
 		}
-		if err := c.ShouldBindJSON(&body); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "任务参数格式不正确"})
+		if err := bindOrderJSON(c, &body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "任务参数格式不正确", "details": err.Error()})
 			return
 		}
+		if rejectAutoPay(c, body.LegacyAutoPay) {
+			return
+		}
+		duration, termErr := orderterm.Normalize(body.Duration)
+		if termErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": termErr.Error()})
+			return
+		}
+		body.Duration = duration
+
 		if body.PlanCode == "" || body.Datacenter == "" {
 			c.JSON(http.StatusOK, gin.H{"success": false, "error": "缺少 planCode 或 datacenter", "code": "E75DA4B08"})
 			return
@@ -122,44 +135,51 @@ func QuickOrder(state *app.State) gin.HandlerFunc {
 
 		// 监控批量入队路径走短 TTL 缓存:monitor 刚刚验过一遍同参数,
 		// batchOrder 并发 N 条各自再跑一遍完整购物车周期,补货瞬间最易触发 429。
-		// 用户手动下单(FromMonitor=false)不走缓存,永远看到新鲜价格
+		// 精确匹配的备车直接复用其已确认报价,其他手动下单仍现场验价。
 		var priceResult price.Result
-		if body.FromMonitor {
-			priceResult = price.GetInternalCached(state, body.AccountID, body.PlanCode, body.Datacenter, options)
-		} else {
-			priceResult = price.GetInternal(state, body.AccountID, body.PlanCode, body.Datacenter, options)
+		if pool, ok := state.OrderPrewarm.(*purchase.CartPool); ok {
+			priceResult.Price = pool.Quote(types.QueueItem{AccountID: body.AccountID, Duration: body.Duration, PlanCode: body.PlanCode, Datacenter: body.Datacenter, Options: options, Coupon: body.Coupon})
 		}
-		if !priceResult.Success {
-			err := priceResult.Error
-			if err == "" {
-				err = "价格查询失败"
+		prepared := priceResult.Price != nil
+		if !prepared {
+			if body.FromMonitor {
+				priceResult = price.GetInternalCached(state, body.AccountID, body.PlanCode, body.Datacenter, options, body.Duration)
+			} else {
+				priceResult = price.GetInternal(state, body.AccountID, body.PlanCode, body.Datacenter, options, body.Duration)
 			}
-			state.Logger.Warn("快速下单前价格校验失败: "+body.PlanCode+"@"+body.Datacenter+" - "+err, "quick_order")
-			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "价格校验失败：" + err})
-			return
-		}
-		if priceResult.Degraded {
-			// 询价时有必填配置没设上,同样的配置在 purchase.go 是 fail-fast,
-			// 放进队列只会浪费一次抢购尝试
-			state.Logger.Warn("快速下单前价格校验降级，拒绝入队: "+priceResult.DegradedReason, "quick_order")
-			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "购物车配置不完整，暂不支持下单：" + priceResult.DegradedReason})
-			return
-		}
-		if priceResult.Price == nil {
-			state.Logger.Warn("快速下单前价格校验失败: price字段缺失", "quick_order")
-			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "价格查询返回数据格式异常：缺少price字段", "code": "EBCF58A32"})
-			return
-		}
-		withTaxRaw, _ := priceResult.Price.Prices["withTax"]
-		if withTaxRaw == nil {
-			state.Logger.Warn("快速下单前价格缺失或无效: "+body.PlanCode+"@"+body.Datacenter, "quick_order")
-			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "该组合暂无有效价格，暂不支持下单", "code": "EE94F16EB"})
-			return
-		}
-		if f, ok := numconv.ToFloat64(withTaxRaw); ok && f == 0 {
-			state.Logger.Warn("快速下单前价格缺失或无效: "+body.PlanCode+"@"+body.Datacenter, "quick_order")
-			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "该组合暂无有效价格，暂不支持下单", "code": "EE94F16EB"})
-			return
+			if !priceResult.Success {
+				err := priceResult.Error
+				if err == "" {
+					err = "价格查询失败"
+				}
+				state.Logger.Warn("快速下单前价格校验失败: "+body.PlanCode+"@"+body.Datacenter+" - "+err, "quick_order")
+				c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "价格校验失败：" + err})
+				return
+			}
+			if priceResult.Degraded {
+				// 询价时有必填配置没设上,同样的配置在 purchase.go 是 fail-fast,
+				// 放进队列只会浪费一次抢购尝试
+				state.Logger.Warn("快速下单前价格校验降级，拒绝入队: "+priceResult.DegradedReason, "quick_order")
+				c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "购物车配置不完整，暂不支持下单：" + priceResult.DegradedReason})
+				return
+			}
+			if priceResult.Price == nil {
+				state.Logger.Warn("快速下单前价格校验失败: price字段缺失", "quick_order")
+				c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "价格查询返回数据格式异常：缺少price字段", "code": "EBCF58A32"})
+				return
+			}
+			withTaxRaw, _ := priceResult.Price.Prices["withTax"]
+			if withTaxRaw == nil {
+				state.Logger.Warn("快速下单前价格缺失或无效: "+body.PlanCode+"@"+body.Datacenter, "quick_order")
+				c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "该组合暂无有效价格，暂不支持下单", "code": "EE94F16EB"})
+				return
+			}
+			if f, ok := numconv.ToFloat64(withTaxRaw); ok && f == 0 {
+				state.Logger.Warn("快速下单前价格缺失或无效: "+body.PlanCode+"@"+body.Datacenter, "quick_order")
+				c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "该组合暂无有效价格，暂不支持下单", "code": "EE94F16EB"})
+				return
+			}
+
 		}
 
 		// 去重:防止同一 plan@dc + 同 options 的任务被重复入队(除非监控来源 + 显式跳过)
@@ -230,15 +250,13 @@ func QuickOrder(state *app.State) gin.HandlerFunc {
 		item := types.QueueItem{
 			ID:         uuid.NewString(),
 			AccountID:  body.AccountID,
+			Duration:   body.Duration,
 			PlanCode:   body.PlanCode,
 			Datacenter: body.Datacenter,
 			Options:    options,
 			Status:     "running",
 			RetryCount: 0,
-			AutoPay:    body.AutoPay,
 			Coupon:     strings.TrimSpace(body.Coupon),
-			// 优惠码被拒时仍按原价自动付款;不开自动付款就无所谓
-			CouponFallback: body.CouponFallback && body.AutoPay,
 			// MaxRetries 封顶的是**真正提交并失败的次数**(FailureCount),无货轮次不计。
 			// 早先按"检查轮次"封顶是错的:监控只在 无货→有货 的跳变上重新触发 quick-order,
 			// 一旦库存持续可见而下单侧连续吃 429/5xx,任务用尽轮次置 failed 后
@@ -272,10 +290,11 @@ func QuickOrder(state *app.State) gin.HandlerFunc {
 		state.Logger.Info("快速下单: "+body.PlanCode+" ("+body.Datacenter+") 已加入队列", "quick_order")
 
 		c.JSON(http.StatusOK, gin.H{
-			"success": true,
-			"message": "✅ " + body.PlanCode + " (" + body.Datacenter + ") 已加入购买队列",
-			"price":   priceResult.Price,
-			"options": options,
+			"success":   true,
+			"message":   "✅ " + body.PlanCode + " (" + body.Datacenter + ") 已加入购买队列",
+			"price":     priceResult.Price,
+			"prewarmed": prepared,
+			"options":   options,
 		})
 	}
 }

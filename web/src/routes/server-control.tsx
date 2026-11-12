@@ -138,7 +138,7 @@ function ServerControlPage() {
       ) : servers.length === 0 ? (
         <Card>
           <EmptyState
-            icon={Server}
+            illustration="control"
             title={t("serverList.list.empty")}
             description={t("serverList.list.emptyDesc")}
           />
@@ -173,7 +173,7 @@ function ServerControlPage() {
             </div>
 
             {/* Tabs */}
-            {selected && <ServerTabs server={selected} />}
+            {selected && <ServerTabs key={`${activeAccount}:${selected.serviceName}`} server={selected} />}
           </CardContent>
         </Card>
       )}

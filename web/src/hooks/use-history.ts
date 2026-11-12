@@ -6,6 +6,7 @@ import i18n from "@/i18n";
 import { apiMessage } from "@/lib/api-error";
 
 export interface PurchaseHistory {
+  duration?: string;
   id: string;
   accountId: string;
   /** 关联的抢购队列任务 ID（后端 PurchaseHistoryEntry.taskId） */
@@ -13,7 +14,7 @@ export interface PurchaseHistory {
   planCode: string;
   datacenter: string;
   options?: string[];
-  status: "success" | "failed";
+  status: "success" | "failed" | "uncertain";
   orderId?: string;
   orderUrl?: string;
   errorMessage?: string;
@@ -25,6 +26,12 @@ export interface PurchaseHistory {
   /** 各阶段墙钟耗时。抢购输了之后唯一有用的信息就是"慢在哪一步" */
   timing?: { name: string; ms: number }[];
   totalMs?: number;
+  /** 发现库存 → 结账请求写出(微秒),以及当时是否预装 / 复用连接 */
+  detectionToWriteUs?: number;
+  prewarmed?: boolean;
+  connectionReused?: boolean;
+  /** 从创建任务到抢到(毫秒) */
+  waitMs?: number;
   /** OVH 侧订单状态(billing.order.OrderStatusEnum):notPaid / checking / delivering /
    *  delivered / cancelling / cancelled / documentsRequested / unknown。
    *  没有它,"下单成功"到底付没付永远不知道。空 = 还没查到 */

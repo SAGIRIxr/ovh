@@ -17,15 +17,11 @@ export interface QueueItem {
   orderId?: string;
   datacenter: string;
   /** 下单成功后用 OVH 默认支付方式自动付款(显式开关,默认关) */
-  autoPay?: boolean;
   coupon?: string;
-  /** 优惠码被拒时仍按原价自动付款(只在 autoPay 时有意义) */
-  couponFallback?: boolean;
+  duration?: string;
   preorder?: boolean;
   /** 强制入队:型号还没上架也一直刷 */
   force?: boolean;
-  /** 上次结账超时且没对上账,恢复后会先对账 */
-  uncertainCheckout?: boolean;
   /** 锁定的整套硬件组合,只在这条 FQN 有货时下单 */
   fqn?: string;
   options: string[];
@@ -43,6 +39,10 @@ export interface QueueItem {
   priority?: number;
   fromTelegram?: boolean;
   configSniperTaskId?: string;
+	orderGroup?: string;
+	groupLimit?: number;
+	stopReason?: string;
+  orderPhase?: string;
 }
 
 /** 抢购队列列表 */
@@ -59,6 +59,7 @@ export function useQueueList() {
 }
 
 export interface PurchaseTiming {
+  dispatchStats?: { samples: number; p50Us: number; p99Us: number };
  dispatch?: { wroteRequest: boolean; detectionToWriteUs: number; connectionReused: boolean; prewarmed: boolean };
   at: string;
   totalMs: number;
@@ -97,23 +98,28 @@ export function useCreateQueueItem() {
   return useMutation({
     mutationFn: async (payload: {
       account_id: string;
+      /** 多账户一起抢,共享数量上限;缺省为 account_id 单账户 */
+      account_ids?: string[];
       planCode: string;
       datacenters: string[];
       options?: string[];
       retryInterval?: number;
       quantity?: number;
-      autoPay?: boolean;
       coupon?: string;
-      couponFallback?: boolean;
+      duration?: string;
       preorder?: boolean;
+      /** 预售有货再下;默认开售即下 */
+      preorderWaitStock?: boolean;
+      purchaseMode?: "perDatacenter" | "total";
       force?: boolean;
       /** 整套硬件组合(<planCode>.<段>...),只在这条 FQN 有货时下单 */
       fqn?: string;
     }) => {
       const dcs = payload.datacenters;
+      const accountIds = payload.account_ids?.length ? payload.account_ids : [payload.account_id];
       // 上界以前完全没有:填 9999 × 5 个机房 = 近 5 万次串行 POST。
       // 后端 EnqueueItems 也会拒,但那是在发出几百个请求之后 —— 这里先收住。
-      const plan = clampOrderPlan(dcs.length, payload.quantity ?? 1);
+      const plan = clampOrderPlan(dcs.length * accountIds.length, payload.quantity ?? 1);
       const qty = plan.quantity;
       if (plan.clamped) {
         toast.warning(
@@ -125,40 +131,24 @@ export function useCreateQueueItem() {
           })
         );
       }
-      let success = 0;
-      let failed = 0;
-      // 第一条失败原因要留下来。以前是 catch 里 failed++ 就完了,
-      // 用户看到「N 个任务创建失败」却不知道为什么(比如撞上了队列总量闸门)。
-      let firstError = "";
-      // 后端判定「三个大区都查不到这个型号」时会带 can_force:可以改成强制入队重试
-      let canForce = false;
-      for (const dc of dcs) {
-        for (let i = 0; i < qty; i++) {
-          try {
-            await api.post("/queue", {
-              account_id: payload.account_id,
-              planCode: payload.planCode,
-              datacenter: dc,
-              retryInterval: payload.retryInterval,
-              options: payload.options || [],
-              autoPay: payload.autoPay ?? false,
-              preorder: payload.preorder ?? false,
-              force: payload.force ?? false,
-              coupon: payload.coupon?.trim() || undefined,
-              couponFallback: payload.couponFallback ?? false,
-              fqn: payload.fqn?.trim() || undefined,
-            });
-            success++;
-          } catch (e: any) {
-            failed++;
-            if (!firstError) firstError = errorMessage(e);
-            if (e?.response?.data?.can_force) canForce = true;
-          }
-        }
+      try {
+        const result = await api.post<{ count: number }>("/queue", {
+        account_id: payload.account_id, account_ids: accountIds, planCode: payload.planCode, datacenters: dcs,
+        quantity: qty, purchaseMode: payload.purchaseMode || "perDatacenter",
+        retryInterval: payload.retryInterval, options: payload.options || [],
+        preorder: payload.preorder ?? false,
+        preorderWaitStock: (payload.preorder ?? false) && (payload.preorderWaitStock ?? false),
+        coupon: payload.coupon?.trim() || undefined, duration: payload.duration || "P1M",
+        force: payload.force ?? false, fqn: payload.fqn?.trim() || undefined,
+      });
+        return { success: result.data.count, failed: 0, total: plan.total, firstError: "", canForce: false };
+      } catch (e: any) {
+        const firstError = errorMessage(e);
+        // 后端判定「三个大区都查不到这个型号」时会带 can_force:交给调用方弹强制入队的选项,这里不重复报错
+        const canForce = !!e?.response?.data?.can_force;
+        if (!canForce) toast.error(i18n.t("hooksMsg.queue.someFailed", { reason: firstError }));
+        return { success: 0, failed: plan.total, total: plan.total, firstError, canForce };
       }
-      // 可强制入队的失败交给调用方弹选项,这里不再重复报错
-      if (failed > 0 && firstError && !canForce) toast.error(i18n.t("hooksMsg.queue.someFailed", { reason: firstError }));
-      return { success, failed, total: dcs.length * qty, firstError, canForce };
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.queue.list() });
@@ -171,7 +161,7 @@ export function useCreateQueueItem() {
 export function useUpdateQueueItem() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async ({ id, ...patch }: { id: string; datacenter: string; options: string[]; retryInterval: number; autoPay: boolean; coupon: string; couponFallback: boolean }) =>
+    mutationFn: async ({ id, ...patch }: { id: string; datacenter: string; options: string[]; retryInterval: number; coupon: string; duration: string }) =>
       (await api.put(`/queue/${encodeURIComponent(id)}`, patch)).data,
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.queue.list() });
@@ -240,7 +230,6 @@ export function useClearQueue() {
 
 /**
  * 把已有任务原样复制到别的账户:型号、机房、配置、FQN、重试间隔、优惠码、强制入队都照搬。
- * keepAutoPay=false 时复制出来的一律不自动付款 —— 换了账户就换了钱包,得用户自己点头。
  * 目标账户已有同机房同配置的任务(没结束的)就跳过,免得一台机器排两条队、抢到两单。
  */
 export function useCopyQueueItems() {
@@ -249,7 +238,6 @@ export function useCopyQueueItems() {
     mutationFn: async (payload: {
       items: QueueItem[];
       accountIds: string[];
-      keepAutoPay: boolean;
       /** 判重用的现有队列 */
       existing: QueueItem[];
     }) => {
@@ -275,12 +263,11 @@ export function useCopyQueueItems() {
               datacenter: it.datacenter,
               retryInterval: it.retryInterval,
               options: it.options || [],
-              autoPay: payload.keepAutoPay && !!it.autoPay,
               preorder: !!it.preorder,
               force: !!it.force,
               coupon: it.coupon || undefined,
-              couponFallback: payload.keepAutoPay && !!it.autoPay && !!it.couponFallback,
               fqn: it.fqn || undefined,
+              duration: it.duration || undefined,
             });
             live.add(key);
             created++;

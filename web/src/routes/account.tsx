@@ -61,6 +61,8 @@ function AccountPage() {
         />
       )}
 
+      {/* 读取失败时横幅已经说明;再摆三张「—」卡片只会占掉手机一整屏 */}
+      {!q.isError && (
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <KpiCard
           icon={User}
@@ -86,9 +88,10 @@ function AccountPage() {
           loading={loading}
         />
       </div>
+      )}
 
       <Tabs defaultValue="emails">
-        <TabsList className="flex-wrap h-auto">
+        <TabsList className="h-auto">
           <TabsTrigger value="emails">{t("account.emailsTab")}</TabsTrigger>
           <TabsTrigger value="orders">{t("account.ordersTab")}</TabsTrigger>
           <TabsTrigger value="refunds">{t("account.refundsTab")}</TabsTrigger>

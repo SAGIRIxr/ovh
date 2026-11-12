@@ -143,7 +143,8 @@ function createApiClient(): AxiosInstance {
         const isAuthLevel =
           code === "NO_API_KEY" || code === "INVALID_API_KEY" || code === "INVALID_DEVICE_TOKEN" || code === "KEY_LOGIN_DISABLED" ||
           error.response.data?.success === undefined; // 非业务 JSON(反向代理/基础认证)也按会话失效处理
-        if (isAuthLevel) {
+        const sentKey = error.config?.headers?.get?.("X-API-Key") ?? "";
+        if (isAuthLevel && sentKey === (getApiSecretKey() ?? "")) {
           notifyAuthFailure();
         }
       }
@@ -155,3 +156,11 @@ function createApiClient(): AxiosInstance {
 }
 
 export const api = createApiClient();
+
+/** Bind a workflow to the account whose data the user reviewed. */
+export function createAccountApi(accountId: string): AxiosInstance {
+  const client = createApiClient();
+  client.defaults.params = { account: accountId };
+  client.defaults.adapter = api.defaults.adapter;
+  return client;
+}

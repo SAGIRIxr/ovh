@@ -8,6 +8,7 @@ import (
 )
 
 type vpsSubRow struct {
+	Duration           string `db:"duration"`
 	ID                 string `db:"id"`
 	PlanCode           string `db:"plan_code"`
 	OvhSubsidiary      string `db:"ovh_subsidiary"`
@@ -22,25 +23,33 @@ type vpsSubRow struct {
 	AutoOrderAccountID string `db:"auto_order_account_id"`
 	AutoOrder          int    `db:"auto_order"`
 	Quantity           int    `db:"quantity"`
-	AutoPay            int    `db:"auto_pay"`
-	OS                 string `db:"os"`
+	// AutoPay 旧版「自动付款」列,功能已删除:读取时忽略,写入恒为 0(清掉旧值)
+	AutoPay int    `db:"auto_pay"`
+	OS      string `db:"os"`
 }
 
-func rowToVPSSub(r vpsSubRow) types.VPSSubscription {
+func rowToVPSSub(r vpsSubRow) (types.VPSSubscription, error) {
 	var dcs []string
-	_ = json.Unmarshal([]byte(r.DatacentersJSON), &dcs)
+	if err := json.Unmarshal([]byte(r.DatacentersJSON), &dcs); err != nil {
+		return types.VPSSubscription{}, fmt.Errorf("vps %s datacenters: %w", r.ID, err)
+	}
 	if dcs == nil {
 		dcs = []string{}
 	}
 	last := map[string]string{}
-	_ = json.Unmarshal([]byte(r.LastStatusJSON), &last)
+	if err := json.Unmarshal([]byte(r.LastStatusJSON), &last); err != nil {
+		return types.VPSSubscription{}, fmt.Errorf("vps %s status: %w", r.ID, err)
+	}
 	var hist []map[string]interface{}
-	_ = json.Unmarshal([]byte(r.HistoryJSON), &hist)
+	if err := json.Unmarshal([]byte(r.HistoryJSON), &hist); err != nil {
+		return types.VPSSubscription{}, fmt.Errorf("vps %s history: %w", r.ID, err)
+	}
 	if hist == nil {
 		hist = []map[string]interface{}{}
 	}
 	return types.VPSSubscription{
 		ID:                 r.ID,
+		Duration:           r.Duration,
 		PlanCode:           r.PlanCode,
 		OvhSubsidiary:      r.OvhSubsidiary,
 		Datacenters:        dcs,
@@ -54,9 +63,8 @@ func rowToVPSSub(r vpsSubRow) types.VPSSubscription {
 		AutoOrderAccountID: r.AutoOrderAccountID,
 		AutoOrder:          r.AutoOrder == 1,
 		Quantity:           r.Quantity,
-		AutoPay:            r.AutoPay == 1,
 		OS:                 r.OS,
-	}
+	}, nil
 }
 
 func vpsSubToRow(s types.VPSSubscription) (vpsSubRow, error) {
@@ -71,7 +79,10 @@ func vpsSubToRow(s types.VPSSubscription) (vpsSubRow, error) {
 	}
 	dcsJSON, _ := json.Marshal(s.Datacenters)
 	lastJSON, _ := json.Marshal(s.LastStatus)
-	histJSON, _ := json.Marshal(s.History)
+	histJSON, err := json.Marshal(s.History)
+	if err != nil {
+		return vpsSubRow{}, err
+	}
 	bi := func(b bool) int {
 		if b {
 			return 1
@@ -80,6 +91,7 @@ func vpsSubToRow(s types.VPSSubscription) (vpsSubRow, error) {
 	}
 	return vpsSubRow{
 		ID:                 s.ID,
+		Duration:           s.Duration,
 		PlanCode:           s.PlanCode,
 		OvhSubsidiary:      s.OvhSubsidiary,
 		DatacentersJSON:    string(dcsJSON),
@@ -93,7 +105,6 @@ func vpsSubToRow(s types.VPSSubscription) (vpsSubRow, error) {
 		AutoOrderAccountID: s.AutoOrderAccountID,
 		AutoOrder:          bi(s.AutoOrder),
 		Quantity:           s.Quantity,
-		AutoPay:            bi(s.AutoPay),
 		OS:                 s.OS,
 	}, nil
 }
@@ -106,7 +117,11 @@ func (db *DB) ListVPSSubscriptions() ([]types.VPSSubscription, error) {
 	}
 	out := make([]types.VPSSubscription, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, rowToVPSSub(r))
+		item, err := rowToVPSSub(r)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
 	}
 	return out, nil
 }
@@ -122,14 +137,15 @@ func (db *DB) UpsertVPSSubscription(s types.VPSSubscription) error {
 	}
 	_, err = db.NamedExec(`
 		INSERT INTO vps_subscriptions
-		(id, plan_code, ovh_subsidiary, datacenters, monitor_linux, monitor_windows,
+		(id, duration, plan_code, ovh_subsidiary, datacenters, monitor_linux, monitor_windows,
 		 notify_available, notify_unavailable, last_status, history, created_at, auto_order_account_id,
 		 auto_order, quantity, auto_pay, os)
 		VALUES
-		(:id, :plan_code, :ovh_subsidiary, :datacenters, :monitor_linux, :monitor_windows,
+		(:id, :duration, :plan_code, :ovh_subsidiary, :datacenters, :monitor_linux, :monitor_windows,
 		 :notify_available, :notify_unavailable, :last_status, :history, :created_at, :auto_order_account_id,
 		 :auto_order, :quantity, :auto_pay, :os)
 		ON CONFLICT(id) DO UPDATE SET
+		  duration           = excluded.duration,
 		  plan_code          = excluded.plan_code,
 		  ovh_subsidiary     = excluded.ovh_subsidiary,
 		  datacenters        = excluded.datacenters,
@@ -168,11 +184,11 @@ func (db *DB) ReplaceVPSSubscriptions(subs []types.VPSSubscription) error {
 		}
 		_, err = tx.NamedExec(`
 			INSERT INTO vps_subscriptions
-			(id, plan_code, ovh_subsidiary, datacenters, monitor_linux, monitor_windows,
+			(id, duration, plan_code, ovh_subsidiary, datacenters, monitor_linux, monitor_windows,
 			 notify_available, notify_unavailable, last_status, history, created_at, auto_order_account_id,
 			 auto_order, quantity, auto_pay, os)
 			VALUES
-			(:id, :plan_code, :ovh_subsidiary, :datacenters, :monitor_linux, :monitor_windows,
+			(:id, :duration, :plan_code, :ovh_subsidiary, :datacenters, :monitor_linux, :monitor_windows,
 			 :notify_available, :notify_unavailable, :last_status, :history, :created_at, :auto_order_account_id,
 			 :auto_order, :quantity, :auto_pay, :os)
 		`, r)

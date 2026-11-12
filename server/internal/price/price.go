@@ -1,17 +1,20 @@
 package price
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"github.com/ovh-buy/server/internal/orderterm"
+	"math"
 	"net/url"
 	"strings"
-
-	ovhsdk "github.com/ovh/go-ovh/ovh"
 
 	"github.com/ovh-buy/server/internal/app"
 	"github.com/ovh-buy/server/internal/catalog"
 	"github.com/ovh-buy/server/internal/numconv"
 	"github.com/ovh-buy/server/internal/ovh"
 	"github.com/ovh-buy/server/internal/types"
+	ovhsdk "github.com/ovh/go-ovh/ovh"
 	"sort"
 	"sync"
 	"time"
@@ -25,14 +28,30 @@ type Result struct {
 	Options    []string `json:"options,omitempty"`
 	// Degraded:价格算出来了,但购物车没有完全配成用户要的样子(某个非机房必填配置没设上)。
 	// 价格仍可展示,但不能拿它当"可以下单"的闸门 —— purchase.go 对同样的配置是 fail-fast 的。
-	Degraded       bool                   `json:"degraded,omitempty"`
-	DegradedReason string                 `json:"degradedReason,omitempty"`
-	Price          *PriceInfo             `json:"price"`
-	Error          string                 `json:"error,omitempty"`
-	Raw            map[string]interface{} `json:"-"`
+	Degraded       bool       `json:"degraded,omitempty"`
+	DegradedReason string     `json:"degradedReason,omitempty"`
+	Price          *PriceInfo `json:"price"`
+	Error          string     `json:"error,omitempty"`
+	// Transient 失败来自超时、网络、429 或 5xx 等暂时性错误,不代表这套配置不能下单。
+	// 监控据此区分「没验成」与「验过、不可下单」;暂时性失败不缓存。
+	Transient bool                   `json:"transient,omitempty"`
+	Raw       map[string]interface{} `json:"-"`
+}
+
+// transientErr 超时、网络错误、408、429、5xx 视为暂时性;明确的业务 4xx 不是。
+func transientErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var apiErr *ovhsdk.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Code == 408 || apiErr.Code == 429 || apiErr.Code >= 500
+	}
+	return true
 }
 
 type PriceInfo struct {
+	Duration    string                   `json:"duration,omitempty"`
 	PricingMode string                   `json:"pricingMode"`
 	Prices      map[string]interface{}   `json:"prices"`
 	Items       []map[string]interface{} `json:"items"`
@@ -58,21 +77,34 @@ type cacheEntry struct {
 const priceCacheTTL = 20 * time.Second
 
 func priceCacheKey(accountID, planCode, datacenter string, options []string) string {
-	sort.Strings(options)
-	return accountID + "|" + planCode + "@" + datacenter + "|" + strings.Join(options, ",")
+	ordered := append([]string(nil), options...)
+	sort.Strings(ordered)
+	return accountID + "|" + planCode + "@" + datacenter + "|" + strings.Join(ordered, ",")
 }
 
 // GetInternalCached 带短 TTL 缓存的 GetInternal(监控轮询/批量入队路径用;
 // 用户显式点击的询价仍走无缓存的 GetInternal,保证手查永远新鲜)
-func GetInternalCached(state *app.State, accountID, planCode, datacenter string, options []string) Result {
-	key := priceCacheKey(accountID, planCode, datacenter, options)
+func GetInternalCached(state *app.State, accountID, planCode, datacenter string, options []string, duration string) Result {
+	acc, ok := state.FindAccount(accountID)
+	if !ok {
+		return Result{Success: false, Error: "下单账户不存在"}
+	}
+	accountID = acc.ID
+	normalized, err := orderterm.Normalize(duration)
+	if err != nil {
+		return Result{Error: err.Error()}
+	}
+	key := normalized + "|" + priceCacheKey(acc.ID+"|"+acc.Endpoint+"|"+strings.ToUpper(acc.Zone), planCode, datacenter, options)
 	internalPriceCache.Lock()
 	if e, ok := internalPriceCache.m[key]; ok && time.Since(e.at) < priceCacheTTL {
 		internalPriceCache.Unlock()
 		return e.result
 	}
 	internalPriceCache.Unlock()
-	r := GetInternal(state, accountID, planCode, datacenter, options)
+	r := GetInternal(state, accountID, planCode, datacenter, options, duration)
+	if !r.Success && r.Transient {
+		return r // 暂时性失败不缓存,下一次检查重新询价
+	}
 	internalPriceCache.Lock()
 	// 防无限增长:超 512 条先清过期
 	if len(internalPriceCache.m) > 512 {
@@ -89,17 +121,25 @@ func GetInternalCached(state *app.State, accountID, planCode, datacenter string,
 
 // GetInternal 询价。accountID 决定用哪个账户调 OVH(空 = 默认账户),
 // 以及购物车走哪个 subsidiary(账户的 zone)。多账户必须区分。
-func GetInternal(state *app.State, accountID, planCode, datacenter string, options []string) Result {
+func GetInternal(state *app.State, accountID, planCode, datacenter string, options []string, duration string) Result {
+	selectedDuration, termErr := orderterm.Normalize(duration)
+	if termErr != nil {
+		return Result{Error: termErr.Error()}
+	}
 	if options == nil {
 		options = []string{}
 	}
 	apiDC := ovh.ConvertDisplayDCToAPIDC(datacenter)
 
-	client, err := state.OVH.IsolatedClientFor(accountID)
+	acc, ok := state.FindAccount(accountID)
+	if !ok {
+		return Result{Success: false, Error: "下单账户不存在"}
+	}
+	accountID = acc.ID
+	client, err := state.OVH.IsolatedClientForAccount(acc)
 	if err != nil {
 		return Result{Success: false, Error: "未配置OVH API密钥: " + ovh.Explain(err)}
 	}
-	acc, _ := state.FindAccount(accountID)
 	subsidiary := orderSubsidiary(state, acc)
 
 	state.Logger.Info(fmt.Sprintf("查询 %s 的配置价格，数据中心: %s (原始: %s), 选项: %v",
@@ -121,7 +161,7 @@ func GetInternal(state *app.State, accountID, planCode, datacenter string, optio
 	if err := client.Post("/order/cart", map[string]interface{}{
 		"ovhSubsidiary": subsidiary,
 	}, &cartResult); err != nil {
-		return Result{Success: false, Error: ovh.Explain(err)}
+		return Result{Success: false, Error: ovh.Explain(err), Transient: transientErr(err)}
 	}
 	cartID, _ = cartResult["cartId"].(string)
 	state.Logger.Debug("购物车创建成功，ID: "+cartID, "price")
@@ -131,7 +171,13 @@ func GetInternal(state *app.State, accountID, planCode, datacenter string, optio
 	// GET /order/cart/{cartId}/eco 的 prices[](order.cart.GenericProductPricing)。
 	// Eco 系列绝大多数就是 P1M/default,所以先按它发 —— 成功路径零额外 RTT;
 	// 只有被 OVH 拒了才去查真实计价重试一次,避免非月付机型永久不可询价。
-	baseDuration, basePricingMode := "P1M", "default"
+	baseDuration, basePricingMode := selectedDuration, "default"
+	if selectedDuration != orderterm.Default {
+		baseDuration, basePricingMode, err = orderterm.Lookup(context.Background(), client, cartID, "eco", planCode, selectedDuration)
+		if err != nil {
+			return Result{Error: err.Error(), Transient: transientErr(err) && !errors.Is(err, orderterm.ErrUnavailable)}
+		}
+	}
 	var itemResult map[string]interface{}
 	postBase := func() error {
 		itemResult = nil
@@ -144,7 +190,7 @@ func GetInternal(state *app.State, accountID, planCode, datacenter string, optio
 	}
 	if err := postBase(); err != nil {
 		msg := ovh.Explain(err)
-		if d, pm, found := lookupEcoPricing(state, client, cartID, planCode, baseDuration); found &&
+		if d, pm, lookupErr := orderterm.Lookup(context.Background(), client, cartID, "eco", planCode, selectedDuration); lookupErr == nil &&
 			(d != baseDuration || pm != basePricingMode) {
 			state.Logger.Warn(fmt.Sprintf("以 %s/%s 加购 %s 失败(%s)，改用目录计价 %s/%s 重试",
 				baseDuration, basePricingMode, planCode, msg, d, pm), "price")
@@ -168,7 +214,7 @@ func GetInternal(state *app.State, accountID, planCode, datacenter string, optio
 						"美区机型带 -us / -eu / -ca 后缀，欧区和加区不带。请改用本区的 planCode，或换一个同区账户询价。",
 					planCode, subsidiary, ovh.SubsidiaryRegion(subsidiary))}
 			}
-			return Result{Success: false, Error: msg}
+			return Result{Success: false, Error: msg, Transient: transientErr(err)}
 		}
 	}
 	itemID, _ := numconv.ToInt64(itemResult["itemId"])
@@ -238,7 +284,7 @@ func GetInternal(state *app.State, accountID, planCode, datacenter string, optio
 				// 机房没设上 → 购物车停留在 OVH 默认机房,summary 出来的是"别的机房的价格"。
 				// 把它当成用户请求机房的价格返回会直接误导买不买的决策,必须硬失败。
 				state.Logger.Error(fmt.Sprintf("设置机房 %s 失败: %s，本次询价作废", cfg.value, err.Error()), "price")
-				return Result{Success: false, Error: "无法把购物车配置到指定机房:" + ovh.Explain(err)}
+				return Result{Success: false, Error: "无法把购物车配置到指定机房:" + ovh.Explain(err), Transient: transientErr(err)}
 			}
 			// os / region 是 requiredConfiguration 里的必填项,没设上时价格可能仍然算得出来,
 			// 但 purchase.go 对同样的失败是 fail-fast,所以这里标 degraded 让下单闸门拒绝放行。
@@ -257,23 +303,21 @@ func GetInternal(state *app.State, accountID, planCode, datacenter string, optio
 	// 与 purchase.go 对齐:拉不到选项列表 / 选项没匹配上 / 加购失败,一律硬失败。
 	// 否则返回的是"少了内存和硬盘的裸机型价格"却标 success:true,
 	// 监控的价格校验和 quick-order 的放行闸门都只看 success + withTax,会照单放行。
-	// 与 purchase.go 一样先剔掉许可证 / OS / 控制面板类选项:那些不在 eco/options 里,
-	// 不过滤就会让"同一份 options 抢购能下单、询价却 400"。UI 路径前端已经滤过一遍
-	// (web/src/lib/option-groups.ts 的 isHardwareOption),外部脚本 / Telegram 不一定。
-	hwOptions := filterHardwareOptions(state, options)
+	// 每个请求的选项都必须在 OVH 列表里匹配并按所选周期加购,不能静默丢弃。
+	orderOptions := catalog.OrderOptions(options)
 	// addedPlanCodes 记的是真正发给 OVH 的那批 planCode(带区域后缀的完整值),
 	// 调用方拿它才能知道价格里到底含了哪几项;回声请求参数会让短前缀看起来"被计价了"
 	addedPlanCodes := []string{}
-	if len(hwOptions) > 0 {
+	if len(orderOptions) > 0 {
 		var availableOpts []map[string]interface{}
 		q := url.Values{}
 		q.Set("planCode", planCode)
 		if err := client.Get(fmt.Sprintf("/order/cart/%s/eco/options?%s", cartID, q.Encode()), &availableOpts); err != nil {
 			state.Logger.Error("获取 Eco 选项列表失败: "+err.Error(), "price")
-			return Result{Success: false, Error: "获取硬件选项列表失败：" + err.Error()}
+			return Result{Success: false, Error: "获取硬件选项列表失败：" + err.Error(), Transient: transientErr(err)}
 		}
 		state.Logger.Debug(fmt.Sprintf("找到 %d 个可用选项", len(availableOpts)), "price")
-		for _, wanted := range hwOptions {
+		for _, wanted := range orderOptions {
 			// 分档匹配(matchEcoOption),与 purchase.go 完全对齐。
 			// addon planCode 是带机型后缀的(三区实测:欧区 ram-128g-on-die-ecc-3600-24adv01-v3,
 			// 美区 ram-128g-ecc-2933-24rise01-v1-us),而 availabilities 的 FQN 段是短前缀
@@ -290,7 +334,10 @@ func GetInternal(state *app.State, accountID, planCode, datacenter string, optio
 			}
 			// duration / pricingMode 只存在于 order.cart.GenericProductPricing(prices[] 元素),
 			// GenericOptionDefinition 顶层没有这两个字段,直接读恒为空
-			duration, pricingMode := pickPricing(matched["prices"], baseDuration)
+			duration, pricingMode, valid := orderterm.Pick(matched["prices"], baseDuration, basePricingMode)
+			if !valid {
+				return Result{Error: fmt.Sprintf("硬件选项 %s 不支持购买时长 %s", matchedPC, selectedDuration)}
+			}
 			// 发出去的必须是 OVH 目录里那条带区域后缀的完整 planCode(matchedPC),
 			// 不是用户传进来的短前缀 —— 前缀匹配的意义就在这里
 			optPayload := map[string]interface{}{
@@ -302,7 +349,7 @@ func GetInternal(state *app.State, accountID, planCode, datacenter string, optio
 			}
 			if err := client.Post(fmt.Sprintf("/order/cart/%s/eco/options", cartID), optPayload, nil); err != nil {
 				state.Logger.Error(fmt.Sprintf("添加选项 %s 失败: %s", matchedPC, err.Error()), "price")
-				return Result{Success: false, Error: "添加硬件选项 " + matchedPC + " 失败：" + err.Error()}
+				return Result{Success: false, Error: "添加硬件选项 " + matchedPC + " 失败：" + err.Error(), Transient: transientErr(err)}
 			}
 			addedPlanCodes = append(addedPlanCodes, matchedPC)
 			state.Logger.Debug("成功添加选项: "+matchedPC, "price")
@@ -316,19 +363,20 @@ func GetInternal(state *app.State, accountID, planCode, datacenter string, optio
 		state.Logger.Warn("绑定购物车失败（可能不需要）: "+err.Error(), "price")
 	}
 
-	// 6. 获取 summary。
-	// 这里以前还会先 GET /order/cart/{cartId}：但 order.cart.Cart.items 是 long[](纯 itemId),
-	// 按对象数组解析永远拿不到明细，白白多一次能让整次询价硬失败的调用，已删。
-	// 逐项明细改从 summary(order.Order)的 details(order.OrderDetail[]) 取。
+	// 6. 先按购物车的 itemId 逐项核验实际周期，再从 summary 读取价格明细。
+	if err := orderterm.VerifyCart(context.Background(), client, cartID, itemID, selectedDuration); err != nil {
+		return Result{Error: err.Error(), Transient: transientErr(err) && !errors.Is(err, orderterm.ErrCartPeriod) && !errors.Is(err, orderterm.ErrCartConfiguration)}
+	}
 	// OVH 错误直接返回 success:false。
 	// 之前 Go 静默忽略会导致瞬断时 success:true 但价格全 nil，前端误以为有效价格 0
 	var cartSummary map[string]interface{}
 	if err := client.Get("/order/cart/"+cartID+"/summary", &cartSummary); err != nil {
-		return Result{Success: false, Error: ovh.Explain(err)}
+		return Result{Success: false, Error: ovh.Explain(err), Transient: transientErr(err)}
 	}
 
 	priceInfo := &PriceInfo{
-		PricingMode: "default",
+		Duration:    baseDuration,
+		PricingMode: basePricingMode,
 		Prices: map[string]interface{}{
 			"withTax":      nil,
 			"withoutTax":   nil,
@@ -400,6 +448,8 @@ func GetInternal(state *app.State, accountID, planCode, datacenter string, optio
 			}
 		}
 	}
+
+	splitRecurringAndSetup(priceInfo, cartSummary)
 
 	withTaxStr := fmt.Sprintf("%v", priceInfo.Prices["withTax"])
 	currencyStr := fmt.Sprintf("%v", priceInfo.Prices["currencyCode"])
@@ -481,119 +531,6 @@ func pickAllowedRegion(allowed []string, prefer string) string {
 	return allowed[0]
 }
 
-// pickPricing 从 order.cart.GenericProductPricing[] 里挑一条计价填 duration / pricingMode。
-//
-// 优先级:duration 必须与主商品一致 > 同 duration 内优先 rental+renew(按周期续费那条)
-// > 实在没有同 duration 才退而求其次;prices 为空或结构异常时回退 P1M/default。
-// 为什么 duration 一致排第一:addon 的 prices[] 常见 P1M/P12M/P24M 三条都是 rental+renew,
-// 先按 rental+renew 挑等于取数组里碰巧的第一条、跟主商品 duration 无关;
-// 一旦挑中与主商品不同的 duration,OVH 直接拒这个 addon,而这里是 fail-fast
-// (整次询价 success:false),代价远大于"少续了一档"。
-// 与 purchase.go 的 pickPricing 必须保持同一份逻辑。
-func pickPricing(pricesRaw interface{}, preferDuration string) (string, string) {
-	list, _ := pricesRaw.([]interface{})
-	type cand struct{ duration, pricingMode string }
-	var sameDurRenew, sameDur, anyRenew, first *cand
-	for _, pRaw := range list {
-		p, ok := pRaw.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		d, _ := p["duration"].(string)
-		pm, _ := p["pricingMode"].(string)
-		if d == "" || pm == "" {
-			continue
-		}
-		c := &cand{duration: d, pricingMode: pm}
-		pt, _ := p["pricingType"].(string)
-		isRenew := pt == "rental" && hasCapacity(p["capacities"], "renew")
-		if first == nil {
-			first = c
-		}
-		if isRenew && anyRenew == nil {
-			anyRenew = c
-		}
-		if d == preferDuration {
-			if sameDur == nil {
-				sameDur = c
-			}
-			if isRenew && sameDurRenew == nil {
-				sameDurRenew = c
-			}
-		}
-	}
-	switch {
-	case sameDurRenew != nil:
-		return sameDurRenew.duration, sameDurRenew.pricingMode
-	case sameDur != nil:
-		return sameDur.duration, sameDur.pricingMode
-	case anyRenew != nil:
-		return anyRenew.duration, anyRenew.pricingMode
-	case first != nil:
-		return first.duration, first.pricingMode
-	}
-	return "P1M", "default"
-}
-
-// filterHardwareOptions 剔除许可证 / OS / 控制面板类选项,只留真正决定机器配置的 addon。
-// 口径与 purchase.go 的同名函数一致 —— 两处必须同进同退,否则会出现
-// "询价说这个组合不可定价、抢购却能下单"(或反之)的分裂。
-// 这里复制一份而不是 import purchase:price 是 purchase 的下游(quick_order 先询价再入队),
-// 反向依赖会成环。
-func filterHardwareOptions(state *app.State, opts []string) []string {
-	filtered := []string{}
-	for _, opt := range opts {
-		if opt == "" {
-			continue
-		}
-		lc := strings.ToLower(opt)
-		skip := false
-		for _, term := range []string{"windows-server", "sql-server", "cpanel-license", "plesk-",
-			"-license-", "os-", "control-panel", "license", "security"} {
-			if strings.Contains(lc, term) {
-				skip = true
-				break
-			}
-		}
-		if skip {
-			state.Logger.Debug("询价跳过非硬件/许可证选项: "+opt, "price")
-			continue
-		}
-		filtered = append(filtered, opt)
-	}
-	return filtered
-}
-
-func hasCapacity(raw interface{}, want string) bool {
-	list, _ := raw.([]interface{})
-	for _, c := range list {
-		if s, _ := c.(string); s == want {
-			return true
-		}
-	}
-	return false
-}
-
-// lookupEcoPricing 查 GET /order/cart/{cartId}/eco(order.cart.GenericProductDefinition[])
-// 里某个 planCode 的真实可用计价。只在按 P1M/default 加购被 OVH 拒之后才调,
-// 这样正常的月付机型一次多余请求都不会发。
-func lookupEcoPricing(state *app.State, client *ovhsdk.Client, cartID, planCode, preferDuration string) (string, string, bool) {
-	var defs []map[string]interface{}
-	if err := client.Get("/order/cart/"+cartID+"/eco", &defs); err != nil {
-		state.Logger.Warn("查询 Eco 计价失败: "+err.Error(), "price")
-		return "", "", false
-	}
-	for _, def := range defs {
-		if pc, _ := def["planCode"].(string); pc != planCode {
-			continue
-		}
-		d, pm := pickPricing(def["prices"], preferDuration)
-		return d, pm, true
-	}
-	state.Logger.Warn("在 Eco 目录里未找到 planCode: "+planCode, "price")
-	return "", "", false
-}
-
 // extractPriceField 兼容字典形式（{value, currencyCode}）与直接值，统一转 float64
 // OVH SDK 用 UseNumber，数字是 json.Number，必须经过 numconv 才能拿到正确值
 func extractPriceField(v interface{}) (interface{}, string) {
@@ -611,4 +548,57 @@ func extractPriceField(v interface{}) (interface{}, string) {
 		return f, ""
 	}
 	return nil, ""
+}
+
+// splitRecurringAndSetup 把 summary 的总价拆成周期费与一次性安装费。
+//
+// GET /order/cart/{id}/summary 的 prices 是**首张账单的合计**:首个周期 + 安装费。
+// 以前直接把它当成「每月价格」展示,同时又单独显示安装费,安装费被算了两次
+// (例:€14.62/月 + €23.36 安装费被印成「€37.98/月」)。
+// details[] 里 detailType=INSTALLATION 的行就是安装费(不含税);各行税率相同,
+// 含税部分按不含税金额的比例拆分。withTax/withoutTax 保持为合计,供「价格有效」闸门使用。
+func splitRecurringAndSetup(info *PriceInfo, summary map[string]interface{}) {
+	withTax, okWith := numconv.ToFloat64(info.Prices["withTax"])
+	withoutTax, okWithout := numconv.ToFloat64(info.Prices["withoutTax"])
+	if !okWith || !okWithout || withoutTax <= 0 {
+		return
+	}
+	setupLines, allLines := 0.0, 0.0
+	if details, ok := summary["details"].([]interface{}); ok {
+		for _, raw := range details {
+			d, _ := raw.(map[string]interface{})
+			if d == nil {
+				continue
+			}
+			v, _ := extractPriceField(d["totalPrice"])
+			f, ok := numconv.ToFloat64(v)
+			if !ok {
+				continue
+			}
+			allLines += f
+			if d["detailType"] == "INSTALLATION" && f > 0 {
+				setupLines += f
+			}
+		}
+	}
+	if setupLines <= 0 {
+		// 没有安装费行:合计就是周期费
+		info.Prices["recurringWithTax"] = withTax
+		info.Prices["recurringWithoutTax"] = withoutTax
+		return
+	}
+	// 明细行通常不含税(税只在订单级 prices 上);若明细合计更接近含税总价,则按含税解读
+	setupExcl, setupWith := setupLines, withTax*setupLines/withoutTax
+	if math.Abs(allLines-withTax) < math.Abs(allLines-withoutTax) {
+		setupWith, setupExcl = setupLines, withoutTax*setupLines/withTax
+	}
+	if setupWith > withTax || setupExcl > withoutTax {
+		return // 数据异常时不拆,保持合计
+	}
+	recurringExcl, recurringWith := withoutTax-setupExcl, withTax-setupWith
+	round := func(v float64) float64 { return math.Round(v*100) / 100 }
+	info.Prices["recurringWithTax"] = round(recurringWith)
+	info.Prices["recurringWithoutTax"] = round(recurringExcl)
+	info.Prices["setupWithTax"] = round(setupWith)
+	info.Prices["setupWithoutTax"] = round(setupExcl)
 }

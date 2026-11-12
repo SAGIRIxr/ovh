@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -93,8 +94,62 @@ func hotFixture(t *testing.T) (*app.State, *atomic.Int32, *atomic.Int32, *atomic
 	state := queueCompletionState(t)
 	var carts, checkouts atomic.Int32
 	var stock atomic.Bool
+	var itemsMu sync.Mutex
+	cartItems := map[string]map[int64]map[string]interface{}{}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
+		parts := strings.Split(strings.Trim(path, "/"), "/")
+		if len(parts) >= 3 && parts[0] == "order" && parts[1] == "cart" {
+			cartID := parts[2]
+			if r.Method == "POST" && (strings.HasSuffix(path, "/eco") || strings.HasSuffix(path, "/eco/options")) {
+				var payload struct {
+					Duration    string `json:"duration"`
+					PlanCode    string `json:"planCode"`
+					PricingMode string `json:"pricingMode"`
+					ParentID    int64  `json:"itemId"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+					t.Error(err)
+					w.WriteHeader(400)
+					return
+				}
+				itemsMu.Lock()
+				defer itemsMu.Unlock()
+				if cartItems[cartID] == nil {
+					cartItems[cartID] = map[int64]map[string]interface{}{}
+				}
+				id := int64(len(cartItems[cartID]) + 1)
+				item := map[string]interface{}{"itemId": id, "duration": payload.Duration, "options": []int64{}, "settings": map[string]interface{}{"planCode": payload.PlanCode, "pricingMode": payload.PricingMode}}
+				cartItems[cartID][id] = item
+				if parent := cartItems[cartID][payload.ParentID]; parent != nil {
+					parent["options"] = append(parent["options"].([]int64), id)
+				}
+				_ = json.NewEncoder(w).Encode(item)
+				return
+			}
+			if r.Method == "GET" && len(parts) == 3 {
+				itemsMu.Lock()
+				defer itemsMu.Unlock()
+				ids := []int64{}
+				for id := range cartItems[cartID] {
+					ids = append(ids, id)
+				}
+				_ = json.NewEncoder(w).Encode(map[string]interface{}{"cartId": cartID, "items": ids})
+				return
+			}
+			if r.Method == "GET" && len(parts) == 5 && parts[3] == "item" {
+				id, _ := strconv.ParseInt(parts[4], 10, 64)
+				itemsMu.Lock()
+				defer itemsMu.Unlock()
+				item := cartItems[cartID][id]
+				if item == nil {
+					w.WriteHeader(404)
+					return
+				}
+				_ = json.NewEncoder(w).Encode(item)
+				return
+			}
+		}
 		switch {
 		case strings.HasSuffix(path, "/auth/time"):
 			fmt.Fprint(w, time.Now().Unix())
@@ -107,18 +162,28 @@ func hotFixture(t *testing.T) (*app.State, *atomic.Int32, *atomic.Int32, *atomic
 		case path == "/order/cart" && r.Method == "POST":
 			id := carts.Add(1)
 			fmt.Fprintf(w, `{"cartId":"cart-%d","expire":"2099-01-01T00:00:00Z"}`, id)
-		case strings.HasSuffix(path, "/eco") && r.Method == "POST":
-			fmt.Fprint(w, `{"itemId":1}`)
 		case strings.HasSuffix(path, "/requiredConfiguration"):
 			fmt.Fprint(w, `[{"label":"region","required":true,"allowedValues":["europe"]}]`)
+		case strings.HasSuffix(path, "/eco") && r.Method == "GET":
+			if stock.Load() {
+				fmt.Fprint(w, `[{"planCode":"plan","prices":[{"duration":"P1M","pricingMode":"default","price":{"value":30,"currencyCode":"EUR"}}]}]`)
+			} else {
+				fmt.Fprint(w, `[]`)
+			}
 		case strings.HasSuffix(path, "/eco/options") && r.Method == "GET":
-			fmt.Fprint(w, `[{"planCode":"ram-32g","prices":[{"duration":"P1M","pricingMode":"default"}]}]`)
+			fmt.Fprint(w, `[{"planCode":"ram-32g","prices":[{"duration":"P1M","pricingMode":"default","price":{"value":30,"currencyCode":"EUR"}}]}]`)
+		case strings.HasSuffix(path, "/summary") && r.Method == "GET":
+			fmt.Fprint(w, `{"prices":{"withTax":{"value":39.98,"currencyCode":"EUR"}}}`)
 		case strings.HasSuffix(path, "/checkout"):
 			if !stock.Load() {
 				t.Error("preparation created an order before stock")
 			}
 			checkouts.Add(1)
-			fmt.Fprint(w, `{}`)
+			fmt.Fprint(w, `{"orderId":123}`)
+		case path == "/me/order/123":
+			fmt.Fprint(w, `{"orderId":123}`)
+		case path == "/me/order/123/status":
+			fmt.Fprint(w, `"notPaid"`)
 		case strings.HasSuffix(path, "/assign") || strings.HasSuffix(path, "/configuration") || strings.HasSuffix(path, "/eco/options") || r.Method == "DELETE":
 			fmt.Fprint(w, `{}`)
 		default:
@@ -132,7 +197,7 @@ func hotFixture(t *testing.T) (*app.State, *atomic.Int32, *atomic.Int32, *atomic
 		if !strings.Contains(r.URL.Path, "/order/catalog/public/eco") {
 			return nil, fmt.Errorf("unexpected outbound public request %s", r.URL)
 		}
-		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"plans":[{"planCode":"plan"}]}`)), Request: r}, nil
+		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(`{"locale":{"currencyCode":"EUR"},"plans":[{"planCode":"plan","pricings":[{"mode":"default","intervalUnit":"month","interval":1,"price":3998000000}]}],"addons":[{"planCode":"ram-32g","pricings":[{"mode":"default","intervalUnit":"month","interval":1,"price":0}]}]}`)), Request: r}, nil
 	})
 	t.Cleanup(func() { http.DefaultTransport = original })
 	state.Accounts = []types.OVHAccount{{ID: "hot-eu", Endpoint: server.URL, Zone: "IE", AppKey: "fixture", AppSecret: "fixture", ConsumerKey: "fixture"}}
@@ -161,6 +226,76 @@ func TestPreparedCartIsReusedOnStockSignal(t *testing.T) {
 		t.Fatal(timing)
 	}
 	t.Logf("prepared full purchase dispatch over real local TCP: %dus", timing.Dispatch.DetectionToWriteUS)
+}
+
+func TestPreparedSessionCannotKeepOldCouponOrHardwareIntent(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		change func(*types.QueueItem)
+	}{
+		{"coupon", func(i *types.QueueItem) { i.Coupon = "discount" }},
+		{"hardware", func(i *types.QueueItem) { i.Options = []string{"ram-64g"} }},
+		{"model", func(i *types.QueueItem) { i.PlanCode = "other" }},
+		{"datacenter", func(i *types.QueueItem) { i.Datacenter = "bhs" }},
+		{"period", func(i *types.QueueItem) { i.Duration = "P12M" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state, _, checkouts, _ := hotFixture(t)
+			item := poolItem()
+			session := &cartSession{}
+			ctx := context.WithValue(context.Background(), cartSessionKey{}, session)
+			defer session.discard()
+			if out := PurchaseServer(ctx, state, &item); !out.WaitingForStock || session.cart == nil {
+				t.Fatal("no prepared cart", out)
+			}
+			old := session.cart
+			tc.change(&item)
+			ctx, cancel := context.WithCancel(ctx)
+			cancel() // Reject new network operations; invalidation must already remove the old intent.
+			_ = PurchaseServer(ctx, state, &item)
+			if session.cart == old || checkouts.Load() != 0 {
+				t.Fatal("old prepared intent remained usable")
+			}
+		})
+	}
+}
+
+func TestPreparedPreorderDoesNotPinUnselectedHardwareWhenStockVariantChanges(t *testing.T) {
+	state, carts, checkouts, stock := hotFixture(t)
+	base, err := state.OVH.ClientFor("hot-eu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	original := base.Client.Transport
+	base.Client.Transport = preorderTransport(func(r *http.Request) (*http.Response, error) {
+		body := ""
+		if stock.Load() {
+			switch {
+			case strings.HasSuffix(r.URL.Path, "/availabilities"):
+				body = `[{"fqn":"plan.ram-64g","datacenters":[{"datacenter":"gra","availability":"1H-low"}]}]`
+			case r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/eco/options"):
+				body = `[{"planCode":"ram-64g","prices":[{"duration":"P1M","pricingMode":"default","price":{"value":30,"currencyCode":"EUR"}}]}]`
+			}
+		}
+		if body != "" {
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body)), Request: r}, nil
+		}
+		return original.RoundTrip(r)
+	})
+	item := poolItem()
+	item.Preorder, item.Options = true, nil
+	session := &cartSession{}
+	defer session.discard()
+	ctx := context.WithValue(context.Background(), cartSessionKey{}, session)
+	if out := PurchaseServer(ctx, state, &item); !out.WaitingForCatalog || session.cart == nil {
+		t.Fatal(out)
+	}
+	stock.Store(true)
+	signal := app.StockSignal{AccountID: item.AccountID, PlanCode: item.PlanCode, DetectedAt: time.Now(), Variants: []map[string]interface{}{{"fqn": "plan.ram-64g", "datacenters": []interface{}{map[string]interface{}{"datacenter": "gra", "availability": "1H-low"}}}}}
+	out := PurchaseServer(context.WithValue(ctx, stockSignalKey{}, signal), state, &item)
+	if !out.Success || carts.Load() != 2 || checkouts.Load() != 1 {
+		t.Fatal("old inferred hardware became an explicit constraint", out, carts.Load(), checkouts.Load())
+	}
 }
 
 // 配置过期或账户出站 client 失效时,旧购物车不得被继续使用。

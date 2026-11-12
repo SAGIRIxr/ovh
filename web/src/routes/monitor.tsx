@@ -1,3 +1,6 @@
+import { OrderDurationField, OrderDurationLabel } from "@/components/queue/OrderDurationField";
+import { useOrderDurations } from "@/hooks/use-order-durations";
+import { supportsDuration } from "@/lib/order-duration";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useTranslation, Trans } from "react-i18next";
 import {
@@ -244,9 +247,10 @@ function MonitorPage() {
       ) : subs.length === 0 ? (
         <Card>
           <EmptyState
-            icon={Bell}
+            illustration="monitor"
             title={t("monitor.list.empty")}
             description={t("monitor.list.emptyDesc")}
+            action={<Button onClick={() => setOpenAdd(true)}>{t("monitor.list.emptyAdd")}</Button>}
           />
         </Card>
       ) : (
@@ -403,15 +407,16 @@ function SubRow({
               {sub.paused && <Chip tone="warning">{t("monitor.row.paused")}</Chip>}
               {sub.notifyAvailable && <Chip tone="success">{t("monitor.row.notifyAvailable")}</Chip>}
               {sub.notifyUnavailable && <Chip tone="warning">{t("monitor.row.notifyUnavailable")}</Chip>}
+              <Chip><OrderDurationLabel value={sub.duration} /></Chip>
               {sub.autoOrder && sub.autoOrderAccountId ? (
                 <>
                   <Chip
                     tone="solid"
-                    title={sub.autoPay ? t("monitor.row.autoPayTitle") : t("monitor.row.manualPayTitle")}
+                    title={t("monitor.row.manualPayTitle")}
                   >
                     {t("monitor.row.autoOrder")}
                     {sub.quantity && sub.quantity > 1 ? ` ×${sub.quantity}` : ""}
-                    {sub.autoPay ? t("monitor.row.autoPaySuffix") : ""}
+                    
                   </Chip>
                   <span className="text-[11px] text-muted-foreground">→</span>
                   <AccountChip accountId={sub.autoOrderAccountId} />
@@ -576,7 +581,7 @@ function AddSubscriptionDialog({
   const [autoOrder, setAutoOrder] = useState(false);
   const [quantity, setQuantity] = useState(1);
   // 默认不自动付款:自动扣钱必须显式打开
-  const [autoPay, setAutoPay] = useState(false);
+  const [duration, setDuration] = useState("P1M");
   // 只盯哪一套配置。空 = 盯全部配置(老行为)。
   // 后端引擎一直支持,以前前端没接 —— 于是网页建的订阅永远是「盯全部」,
   // 而通知和自动下单是按配置逐套触发的:三套配置同时补货就是三份通知、三单。
@@ -609,6 +614,8 @@ function AddSubscriptionDialog({
   const autoOrderAccountId =
     editing?.autoOrderAccountId || globalAccountId || allAccounts?.find((a) => a.isDefault)?.id || allAccounts?.[0]?.id || "";
   const activeAcc = findAccountByID(allAccounts, autoOrderAccountId);
+  const durationOptions = useOrderDurations(autoOrderAccountId, planCode.trim(), "eco", open);
+  const durationSupported = supportsDuration(durationOptions.data, duration);
   // 账户列表读失败 ≠ 一个账户都没配。两种情况以前都显示「未选择账户」,
   // 然后自动下单被静默拦掉 —— 用户看到的是一条没有理由的死路:
   // 去账户页明明有账户,回来还是"未选择"。失败必须说出失败,并给重试。
@@ -621,7 +628,7 @@ function AddSubscriptionDialog({
     setNotifyUnavailable(false);
     setAutoOrder(false);
     setQuantity(1);
-    setAutoPay(false);
+    setDuration("P1M");
     setPicked({});
     setExtraOptions("");
     setPasteOpen(false);
@@ -661,7 +668,7 @@ function AddSubscriptionDialog({
       setNotifyUnavailable(editing.notifyUnavailable);
       setAutoOrder(!!editing.autoOrder);
       setQuantity(editing.quantity && editing.quantity > 0 ? editing.quantity : 1);
-      setAutoPay(!!editing.autoPay);
+      setDuration(editing.duration || "P1M");
       // 配置的回填交给下面那个 effect —— 它要等目录到位才能把 addon code
       // 映射成 chip,而目录是异步来的,不能塞进这个"打开即重灌"的 effect 里
     } else {
@@ -731,6 +738,7 @@ function AddSubscriptionDialog({
       );
       return;
     }
+    if (!durationSupported) { toast.error(t("orderDuration.unsupported")); return; }
     const payload = {
       planCode: code,
       datacenters: dcs,
@@ -739,7 +747,7 @@ function AddSubscriptionDialog({
       autoOrder,
       quantity: autoOrder ? quantity : undefined,
       autoOrderAccountId: autoOrder ? autoOrderAccountId : "",
-      autoPay: autoOrder ? autoPay : false,
+      duration,
       // 始终显式传:PUT 用 *[]string 区分「没传」和「改成空数组」,
       // 不传的话后端保留旧值,用户在界面上清空了配置却不生效
       options: chosenOptions,
@@ -908,6 +916,8 @@ function AddSubscriptionDialog({
             </label>
           </div>
 
+          {!autoOrder && <OrderDurationField value={duration} onChange={setDuration} query={durationOptions} />}
+
           {autoOrder && (
             <div className="space-y-3">
               <div>
@@ -950,6 +960,7 @@ function AddSubscriptionDialog({
                   </p>
                 ) : null}
               </div>
+              <OrderDurationField value={duration} onChange={setDuration} query={durationOptions} />
               <div>
                 <label className="block text-xs font-medium text-muted-foreground mb-1.5">
                   {t("monitor.dialog.qtyLabel")}
@@ -970,13 +981,7 @@ function AddSubscriptionDialog({
                 <p className="text-[11px] text-muted-foreground mt-1.5">
                   {t("monitor.dialog.qtyHint")}
                 </p>
-                <label className="flex items-center gap-2 mt-2 cursor-pointer text-[12px]">
-                  <Checkbox checked={autoPay} onCheckedChange={(v) => setAutoPay(!!v)} />
-                  {t("monitor.dialog.autoPay")}
-                </label>
-                <p className="text-[11px] text-muted-foreground mt-1">
-                  {t("monitor.dialog.autoPayHint")}
-                </p>
+                <p className="text-[11px] text-muted-foreground mt-1.5">{t("monitor.row.manualPayTitle")}</p>
             </div>
             </div>
           )}

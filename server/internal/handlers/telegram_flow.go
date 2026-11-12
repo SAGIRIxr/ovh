@@ -13,6 +13,7 @@ import (
 	"github.com/ovh-buy/server/internal/app"
 	"github.com/ovh-buy/server/internal/catalog"
 	"github.com/ovh-buy/server/internal/monitor"
+	"github.com/ovh-buy/server/internal/orderterm"
 	"github.com/ovh-buy/server/internal/telegram"
 	"github.com/ovh-buy/server/internal/types"
 )
@@ -325,6 +326,13 @@ var actionChoices = []struct {
 func askAction(state *app.State, f *watchFlow, chatID interface{}, messageID int64) bool {
 	f.Step = stepAction
 	tok := putFlow(f)
+	dcs := append([]string(nil), f.DCs...)
+	if len(dcs) == 0 {
+		dcs = []string{""}
+	}
+	for _, dc := range dcs {
+		go telegram.PrewarmOrder(state, "tg:"+tok+":"+dc, f.AccountID, f.PlanCode, dc, 1, append([]string(nil), f.PickedOptions...), flowTTL, "")
+	}
 	labels := make([]string, 0, len(actionChoices))
 	for _, a := range actionChoices {
 		labels = append(labels, a.Label)
@@ -384,7 +392,11 @@ func handleFlowCallback(state *app.State, mon *monitor.Monitor, cb map[string]in
 			telegram.SendReply(state, chatID, "这条订阅已经被删掉了，发 /watch "+f.PlanCode+" 重新开始。", messageID)
 			return true
 		}
-		mon.SaveToDB()
+		if _, err := persistMonitorChanges(mon); err != nil {
+			telegram.AnswerCallback(state, idToString(cb["id"]), "保存失败,监控已停止", true)
+			telegram.SendReply(state, chatID, "保存监控配置失败,请检查存储后重试: "+err.Error(), messageID)
+			return true
+		}
 		telegram.AnswerCallback(state, idToString(cb["id"]), "好", false)
 		if len(opts) == 0 {
 			telegram.SendReply(state, chatID,
@@ -448,6 +460,11 @@ func handleFlowCallback(state *app.State, mon *monitor.Monitor, cb map[string]in
 
 		switch {
 		case idx == iCancel:
+			if state.OrderPrewarm != nil {
+				for _, account := range append(f.Confirm[:len(f.Confirm):len(f.Confirm)], f.Accounts...) {
+					state.OrderPrewarm.Cancel("tg:" + tok + ":" + account.ID)
+				}
+			}
 			telegram.AnswerCallback(state, idToString(cb["id"]), "已取消", false)
 			telegram.SendReply(state, chatID, "✖️ 已取消，没有创建任何任务。", messageID)
 		case len(f.Accounts) > 1 && idx == iAll:
@@ -483,7 +500,7 @@ func handleFlowCallback(state *app.State, mon *monitor.Monitor, cb map[string]in
 		}
 		telegram.AnswerCallback(state, idToString(cb["id"]), "开始下单", false)
 		o := f.Order
-		res := telegram.ProcessOrder(state, acc.ID, o.PlanCode, o.Datacenter, o.Quantity, o.Options)
+		res := telegram.ProcessOrder(state, acc.ID, o.PlanCode, o.Datacenter, o.Quantity, o.Options, o.Duration)
 		if res.Success {
 			telegram.SendReply(state, chatID, fmt.Sprintf(
 				"📥 已创建 %d/%d 个抢购任务\n\n型号: %s\n账户: %s\n\n"+
@@ -528,10 +545,11 @@ func finishWatchFlow(state *app.State, mon *monitor.Monitor, f *watchFlow, quant
 		}
 	}
 
-	// autoPay 恒 false：自动付款是要用户显式打开的开关，不能在几下点击里替他决定。
 	mon.AddSubscription(f.PlanCode, f.DCs, true, false, "", nil, nil,
-		autoOrder, quantity, accountID, false, f.PickedOptions)
-	mon.SaveToDB()
+		autoOrder, quantity, accountID, f.PickedOptions, "")
+	if _, err := persistMonitorChanges(mon); err != nil {
+		return "保存监控配置失败,监控已停止,请检查存储后重试: " + err.Error()
+	}
 
 	started := false
 	if !mon.Running() {
@@ -561,7 +579,7 @@ func finishWatchFlow(state *app.State, mon *monitor.Monitor, f *watchFlow, quant
 		if f.PickedConfig == "" {
 			b.WriteString("，且每套配置各算一次")
 		}
-		b.WriteString("。\n抢到的订单默认不自动付款，需要你去付。\n")
+		b.WriteString("。\n抢到的订单不会自动付款，请到 OVH 订单页付款。\n")
 	} else {
 		b.WriteString("补货时：只发通知，你点按钮再下单\n")
 		if f.AccountLabel != "" {
@@ -581,6 +599,7 @@ func actionPrompt(f *watchFlow) string {
 	var b strings.Builder
 	b.WriteString("🎯 补货的时候怎么办？\n\n")
 	b.WriteString("型号：" + f.PlanCode + "\n")
+	b.WriteString("购买时长：" + orderterm.Label("") + "（可用 /watch 型号 P12M 选择 1 年）\n")
 	if f.PickedConfig != "" {
 		b.WriteString("配置：" + f.PickedConfig + "\n")
 	} else {

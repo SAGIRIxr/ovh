@@ -116,6 +116,8 @@ var usedEndpoints = []string{
 	"POST /support/tickets/{ticketId}/close",
 	"POST /support/tickets/{ticketId}/reopen",
 
+	// 结果不明的结账核对(只读):按时间列订单 → 明细 → 下单时的 plan/配置
+	"GET /me/order/{orderId}/details/{orderDetailId}/extension",
 	"GET /me/order/{orderId}/paymentMethods",
 	"GET /me/order/{orderId}/availablePaymentMethod",
 	"GET /me/payment/method/{paymentMethodId}",
@@ -243,6 +245,7 @@ var usedEndpoints = []string{
 
 	// —— 下单 / 目录 ——
 	"POST /order/cart",
+	"GET /order/cart/{cartId}",
 	"DELETE /order/cart/{cartId}",
 	"POST /order/cart/{cartId}/assign",
 	"POST /order/cart/{cartId}/checkout",
@@ -252,10 +255,13 @@ var usedEndpoints = []string{
 	"GET /order/cart/{cartId}/eco/options",
 	"POST /order/cart/{cartId}/eco/options",
 	"POST /order/cart/{cartId}/item/{itemId}/configuration",
+	"GET /order/cart/{cartId}/item/{itemId}",
 	"GET /order/cart/{cartId}/item/{itemId}/requiredConfiguration",
 	"GET /order/cart/{cartId}/summary",
 	"GET /order/cart/{cartId}/vps",
 	"POST /order/cart/{cartId}/vps",
+	"GET /order/cart/{cartId}/vps/options",
+	"POST /order/cart/{cartId}/vps/options",
 	"GET /order/catalog/public/eco",
 	"GET /order/catalog/public/vps",
 

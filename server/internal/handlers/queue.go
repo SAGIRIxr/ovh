@@ -14,6 +14,8 @@ import (
 
 	"github.com/ovh-buy/server/internal/app"
 	"github.com/ovh-buy/server/internal/catalog"
+	"github.com/ovh-buy/server/internal/orderterm"
+	"github.com/ovh-buy/server/internal/ovh"
 	"github.com/ovh-buy/server/internal/purchase"
 	"github.com/ovh-buy/server/internal/types"
 )
@@ -23,37 +25,62 @@ import (
 func AddQueueItem(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var body struct {
-			AccountID     string   `json:"account_id"`
+			Duration  string `json:"duration"`
+			AccountID string `json:"account_id"`
+			// AccountIDs 多账户一起抢同一单:任一账户抢到都计入同一份数量上限,台数不会按账户翻倍。
+			AccountIDs    []string `json:"account_ids"`
 			PlanCode      string   `json:"planCode"`
 			Datacenter    string   `json:"datacenter"`
+			Datacenters   []string `json:"datacenters"`
+			Quantity      *int     `json:"quantity"`
+			PurchaseMode  string   `json:"purchaseMode"`
 			Options       []string `json:"options"`
 			RetryInterval int      `json:"retryInterval"`
-			// AutoPay 下单成功后用默认支付方式自动付款(显式开关,默认关)
-			AutoPay  bool   `json:"autoPay"`
-			Preorder bool   `json:"preorder"`
-			Coupon   string `json:"coupon"`
-			// Force 强制入队还没上架的型号;CouponFallback 优惠码被拒时仍按原价自动付款
-			Force          bool `json:"force"`
-			CouponFallback bool `json:"couponFallback"`
+			// LegacyAutoPay 旧页面字段,仅为兼容;true 会被拒绝(自动付款功能已删除)
+			LegacyAutoPay *bool `json:"autoPay"`
+			Preorder      bool  `json:"preorder"`
+			// PreorderWaitStock 预售等库存出现再结账,默认开售即下
+			PreorderWaitStock bool   `json:"preorderWaitStock"`
+			Coupon            string `json:"coupon"`
+			// Force 强制入队还没上架的型号
+			Force bool `json:"force"`
 			// FQN 可选:锁定整套硬件组合,只在这条 FQN 有货时下单
 			FQN string `json:"fqn"`
 		}
-		if err := c.ShouldBindJSON(&body); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "任务参数格式不正确"})
+		if err := bindOrderJSON(c, &body); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "任务参数格式不正确", "details": err.Error()})
 			return
 		}
-		if body.AccountID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "缺少 account_id", "code": "E34CBF1D4"})
+		if rejectAutoPay(c, body.LegacyAutoPay) {
 			return
 		}
-		if _, ok := state.FindAccount(body.AccountID); !ok {
-			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "account_id 不存在", "code": "E7B315B13"})
+		duration, termErr := orderterm.Normalize(body.Duration)
+		if termErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": termErr.Error()})
 			return
 		}
+		body.Duration = duration
+
+		accounts, accErr := queueAccounts(state, body.AccountID, body.AccountIDs)
+		if accErr != nil {
+			c.JSON(http.StatusBadRequest, accErr)
+			return
+		}
+		body.AccountID = accounts[0]
 		body.PlanCode = strings.TrimSpace(body.PlanCode)
 		body.Datacenter = strings.TrimSpace(body.Datacenter)
-		if body.PlanCode == "" || body.Datacenter == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "缺少 planCode 或 datacenter", "code": "E75DA4B08"})
+		if len(body.Datacenters) == 0 && body.Datacenter != "" {
+			body.Datacenters = []string{body.Datacenter}
+		} else if body.Datacenter != "" {
+			c.JSON(400, gin.H{"error": "datacenter 与 datacenters 不能同时填写"})
+			return
+		}
+		qty := 1
+		if body.Quantity != nil {
+			qty = *body.Quantity
+		}
+		if body.PlanCode == "" || qty < 1 || qty > types.MaxOrderQuantity || len(body.Datacenters) == 0 || len(accounts)*len(body.Datacenters)*qty > types.MaxOrderFanout || (body.PurchaseMode != "" && body.PurchaseMode != "perDatacenter" && body.PurchaseMode != "total") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "请填写型号、机房及有效数量和购买方式"})
 			return
 		}
 		body.FQN = strings.ToLower(strings.TrimSpace(body.FQN))
@@ -61,6 +88,17 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": fmt.Sprintf("FQN 必须以「%s.」开头（格式 <planCode>.<内存段>.<硬盘段>）", body.PlanCode)})
 			return
 		}
+		seen := map[string]bool{}
+		for i, dc := range body.Datacenters {
+			dc = ovh.ConvertDisplayDCToAPIDC(strings.TrimSpace(dc))
+			if dc == "" || seen[dc] {
+				c.JSON(400, gin.H{"error": "机房不能为空或重复"})
+				return
+			}
+			seen[dc] = true
+			body.Datacenters[i] = dc
+		}
+
 		// 入队前挡住"这个账户根本买不到这台机器"的任务(跨区 / 非 Eco / planCode 不存在)。
 		// 前端的下单对话框有独立的账户选择器(web/src/routes/servers.tsx:646),
 		// 机型列表却是按另一个账户拉的 —— 拿欧区机型配美区账户是一键就能做出来的组合。
@@ -70,40 +108,49 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 		// 探测失败(catalog.PlanVerdictUnknown)不拦 —— 一次网络瞬断不该让用户下不了单。
 		// 用户明确选了强制入队时,只放过「哪里都查不到」(还没上架的新型号);
 		// 跨区 / 非 Eco 是确定性买不到,强制也不放。can_force 告诉前端能不能提供这个选项。
-		if verdict, hint := catalog.ClassifyPlan(state, body.AccountID, body.PlanCode, "queue"); hint != "" && !(body.Preorder && verdict == catalog.PlanVerdictPrerelease) {
-			if body.Force && verdict == catalog.PlanVerdictNoSuchPlan {
-				state.Logger.Warn(fmt.Sprintf("[queue] 强制添加未上架型号 %s 在 %s: %s", body.PlanCode, body.Datacenter, hint), "queue")
-			} else {
+		for _, account := range accounts {
+			if verdict, hint := catalog.ClassifyPlan(state, account, body.PlanCode, "queue"); hint != "" && !(body.Preorder && verdict == catalog.PlanVerdictPrerelease) {
+				if body.Force && verdict == catalog.PlanVerdictNoSuchPlan {
+					state.Logger.Warn(fmt.Sprintf("[queue] 强制添加未上架型号 %s: %s", body.PlanCode, hint), "queue")
+					continue
+				}
 				state.Logger.Warn(fmt.Sprintf("[queue] 拒绝任务(判定 %d): %s", verdict, hint), "queue")
-				c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": hint, "can_force": verdict == catalog.PlanVerdictNoSuchPlan})
+				c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": hint, "account_id": account, "can_force": verdict == catalog.PlanVerdictNoSuchPlan})
 				return
 			}
 		}
 		// 没给 / 给 0 = 用全局默认(设置页可改);超出区间夹回来
 		body.RetryInterval = types.ClampRetryInterval(body.RetryInterval, state.Config.RetryInterval())
-		item := types.QueueItem{
-			ID:            uuid.NewString(),
-			AccountID:     body.AccountID,
-			PlanCode:      body.PlanCode,
-			Datacenter:    body.Datacenter,
-			Options:       body.Options,
-			Status:        "running",
-			CreatedAt:     types.NowISO(),
-			UpdatedAt:     types.NowISO(),
-			RetryInterval: body.RetryInterval,
-			RetryCount:    0,
-			LastCheckTime: 0,
-			AutoPay:       body.AutoPay,
-			Preorder:      body.Preorder,
-			Coupon:        strings.TrimSpace(body.Coupon),
-			Force:         body.Force,
-			// 只在自动付款时有意义,不开自动付款的话被拒也只是生成一张未付款订单
-			CouponFallback: body.CouponFallback && body.AutoPay,
-			FQN:            body.FQN,
+		items := make([]types.QueueItem, 0, len(accounts)*len(body.Datacenters)*qty)
+		ids := make([]string, 0, cap(items))
+		group := ""
+		if body.PurchaseMode == "total" {
+			group = uuid.NewString()
 		}
+		for _, dc := range body.Datacenters {
+			dcGroup := group
+			if dcGroup == "" && len(accounts) > 1 {
+				// 按机房下单 + 多账户:每个机房一份上限,多个账户只是多几条抢的通道。
+				dcGroup = uuid.NewString()
+			}
+			for _, account := range accounts {
+				for n := 0; n < qty; n++ {
+					item := types.QueueItem{ID: uuid.NewString(), AccountID: account, Duration: body.Duration, PlanCode: body.PlanCode, Datacenter: dc,
+						Options: append([]string(nil), body.Options...), Status: "running", CreatedAt: types.NowISO(), UpdatedAt: types.NowISO(), RetryInterval: body.RetryInterval,
+						Preorder: body.Preorder, PreorderWaitStock: body.Preorder && body.PreorderWaitStock, Coupon: strings.TrimSpace(body.Coupon), OrderGroup: dcGroup,
+						Force: body.Force, FQN: body.FQN}
+					if dcGroup != "" {
+						item.GroupLimit = qty
+					}
+					items = append(items, item)
+					ids = append(ids, item.ID)
+				}
+			}
+		}
+
 		// 入队 + 落库是一件事:EnqueueItems 失败会把这条从内存撤回,
 		// 不留"这次能跑但重启就丢"的半成功任务
-		if err := state.EnqueueItems([]types.QueueItem{item}, false); err != nil {
+		if err := state.EnqueueItems(items, false); err != nil {
 			state.Logger.Error("添加任务后保存队列失败,已撤回: "+err.Error(), "queue")
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"status": "error",
@@ -111,9 +158,8 @@ func AddQueueItem(state *app.State) gin.HandlerFunc {
 			})
 			return
 		}
-		state.Logger.Info("添加任务 "+item.ID+" ("+item.PlanCode+" 在 "+item.Datacenter+", 账户 "+body.AccountID+") 到队列并立即启动 (状态: running)", "")
-		// 不再有 warning 分支:落库要么成功、要么整条撤回并报错,没有中间态
-		c.JSON(http.StatusOK, gin.H{"status": "success", "id": item.ID})
+		state.Logger.Info(fmt.Sprintf("添加 %d 个 %s 抢购任务（账户 %s，总量限制 %s）", len(items), body.PlanCode, strings.Join(accounts, ","), body.PurchaseMode), "queue")
+		c.JSON(http.StatusOK, gin.H{"status": "success", "id": ids[0], "ids": ids, "count": len(ids)})
 	}
 }
 
@@ -163,18 +209,28 @@ func RemoveQueueItem(state *app.State) gin.HandlerFunc {
 func UpdateQueueItem(state *app.State) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var body struct {
-			Datacenter     string   `json:"datacenter"`
-			Options        []string `json:"options"`
-			RetryInterval  int      `json:"retryInterval"`
-			AutoPay        bool     `json:"autoPay"`
-			Coupon         string   `json:"coupon"`
-			CouponFallback bool     `json:"couponFallback"`
+			Duration      *string  `json:"duration"`
+			Datacenter    string   `json:"datacenter"`
+			Options       []string `json:"options"`
+			RetryInterval int      `json:"retryInterval"`
+			// LegacyAutoPay 旧页面字段,仅为兼容;true 会被拒绝(自动付款功能已删除)
+			LegacyAutoPay *bool  `json:"autoPay"`
+			Coupon        string `json:"coupon"`
 		}
-		if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Datacenter) == "" || body.RetryInterval < types.MinRetryInterval || body.RetryInterval > types.MaxRetryInterval {
+		if err := bindOrderJSON(c, &body); err != nil || strings.TrimSpace(body.Datacenter) == "" || body.RetryInterval < types.MinRetryInterval || body.RetryInterval > types.MaxRetryInterval {
 			c.JSON(http.StatusBadRequest, gin.H{"status": "error", "error": "请填写机房及有效的重试间隔"})
 			return
 		}
-		if err := state.UpdateQueueItem(c.Param("id"), strings.TrimSpace(body.Datacenter), body.Options, body.RetryInterval, body.AutoPay, strings.TrimSpace(body.Coupon), body.CouponFallback); err != nil {
+		if rejectAutoPay(c, body.LegacyAutoPay) {
+			return
+		}
+		if body.Duration != nil {
+			if _, err := orderterm.Normalize(*body.Duration); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+		}
+		if err := state.UpdateQueueItem(c.Param("id"), strings.TrimSpace(body.Datacenter), body.Options, body.RetryInterval, strings.TrimSpace(body.Coupon), body.Duration); err != nil {
 			status := http.StatusInternalServerError
 			if errors.Is(err, app.ErrQueueNotFound) {
 				status = http.StatusNotFound
@@ -274,6 +330,25 @@ func UpdateQueueStatus(state *app.State) gin.HandlerFunc {
 		}
 		found := false
 		var blockErr error
+		if body.Status == "running" || body.Status == "pending" {
+			if err := state.RestoreCompletedQueue(); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "无法核对已下单记录,未恢复任务: " + err.Error()})
+				return
+			}
+			if err := state.ResumeQueueItem(id, body.Status); err != nil {
+				switch {
+				case errors.Is(err, app.ErrQueueAlreadyOrdered):
+					c.JSON(http.StatusConflict, gin.H{"error": err.Error(), "code": "QUEUE_ALREADY_ORDERED"})
+				case errors.Is(err, app.ErrQueueNotFound):
+					c.JSON(http.StatusNotFound, gin.H{"error": err.Error(), "code": "E10FEEC40"})
+				default:
+					c.JSON(http.StatusInternalServerError, gin.H{"error": "恢复失败,任务保持原状态: " + err.Error()})
+				}
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"status": "success"})
+			return
+		}
 		state.QueueMu.Lock()
 		for i := range state.Queue {
 			if state.Queue[i].ID == id {
@@ -283,12 +358,6 @@ func UpdateQueueStatus(state *app.State) gin.HandlerFunc {
 					return
 				}
 				blockErr = state.SetAutomaticOrderBlockedLocked(state.Queue[i], body.Status != "running" && body.Status != "pending")
-				// 恢复必须先成功写入许可,失败时保持停止。
-				if blockErr != nil && (body.Status == "running" || body.Status == "pending") {
-					state.QueueMu.Unlock()
-					c.JSON(500, gin.H{"error": blockErr.Error()})
-					return
-				}
 				state.Queue[i].Status = body.Status
 				state.Queue[i].UpdatedAt = types.NowISO()
 				if body.Status != "running" {
@@ -381,4 +450,30 @@ func ClearPurchaseHistory(state *app.State) gin.HandlerFunc {
 		state.Logger.Info("Purchase history cleared", "")
 		c.JSON(http.StatusOK, gin.H{"status": "success"})
 	}
+}
+
+// queueAccounts 解析下单账户:兼容旧的单个 account_id,也接受多账户 account_ids。
+// 返回去重后的实际账户 ID,第一个是主账户;任一账户不存在都整单拒绝。
+func queueAccounts(state *app.State, single string, many []string) ([]string, gin.H) {
+	refs := append([]string(nil), many...)
+	if len(refs) == 0 && single != "" {
+		refs = []string{single}
+	}
+	if len(refs) == 0 {
+		return nil, gin.H{"status": "error", "error": "缺少 account_id", "code": "E34CBF1D4"}
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(refs))
+	for _, ref := range refs {
+		acc, ok := state.FindAccount(strings.TrimSpace(ref))
+		if !ok || strings.TrimSpace(ref) == "" {
+			return nil, gin.H{"status": "error", "error": "account_id 不存在", "code": "E7B315B13", "account_id": ref}
+		}
+		if seen[acc.ID] {
+			continue
+		}
+		seen[acc.ID] = true
+		out = append(out, acc.ID)
+	}
+	return out, nil
 }

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"fmt"
+	"github.com/ovh-buy/server/internal/orderterm"
 	"strconv"
 	"strings"
 
@@ -40,17 +41,27 @@ func watchText(state *app.State, mon *monitor.Monitor, args []string) string {
 			"  /watch 24sk602 gra rbx    只盯这两个机房\n" +
 			"  /watch 24sk602 gra x2     补货时自动抢 2 台\n\n" +
 			"带 x<数量> 才会自动下单；不带只发通知，你收到后再点按钮。\n" +
-			"取消盯：/unwatch <型号>"
+			"购买时长可加 P12M（1 年），默认 P1M（1 个月）。\n取消盯：/unwatch <型号>"
 	}
 
 	planCode := strings.TrimSpace(args[0])
 	dcs := []string{}
 	quantity := 0
 	autoOrder := false
+	duration := orderterm.Default
 
 	for _, a := range args[1:] {
 		a = strings.TrimSpace(strings.ToLower(a))
 		if a == "" {
+			continue
+		}
+		if strings.HasPrefix(a, "p") && len(a) > 1 && a[1] >= '0' && a[1] <= '9' || strings.HasPrefix(a, "duration=") {
+			raw := strings.TrimPrefix(a, "duration=")
+			var err error
+			duration, err = orderterm.Normalize(raw)
+			if err != nil {
+				return err.Error()
+			}
 			continue
 		}
 		// x2 / X2 = 自动下单 2 台
@@ -112,10 +123,10 @@ func watchText(state *app.State, mon *monitor.Monitor, args []string) string {
 		}
 	}
 
-	// autoPay 恒 false：自动付款是个要用户显式打开的开关，
-	// 不能因为他在手机上打了句 /watch 就替他决定花钱方式。
-	mon.AddSubscription(planCode, dcs, true, false, "", nil, nil, autoOrder, quantity, accountID, false, nil)
-	mon.SaveToDB()
+	mon.AddSubscription(planCode, dcs, true, false, "", nil, nil, autoOrder, quantity, accountID, nil, duration)
+	if _, err := persistMonitorChanges(mon); err != nil {
+		return "保存监控配置失败,监控已停止,请检查存储后重试: " + err.Error()
+	}
 
 	// 监控没在跑的话订阅加了也没用 —— 顺手拉起来，并说清楚
 	started := false
@@ -145,7 +156,7 @@ func watchText(state *app.State, mon *monitor.Monitor, args []string) string {
 		b.WriteString(fmt.Sprintf(
 			"\n⚠️ 这是真实下单，而且 %d 是**每个机房、每套配置**各 %d 台。\n"+
 				"这个型号如果有多套配置同时补货，实际下单数 = 配置数 × 机房数 × %d。\n"+
-				"抢到的订单默认不自动付款，需要你去付。\n",
+				"抢到的订单不会自动付款，请到 OVH 订单页付款。\n",
 			quantity, quantity, quantity))
 	} else {
 		b.WriteString("补货时：只发通知，你点按钮再下单\n")
@@ -170,7 +181,9 @@ func unwatchText(state *app.State, mon *monitor.Monitor, args []string) string {
 	if !mon.RemoveSubscription(planCode) {
 		return "没有在盯 " + planCode + "。\n\n发 /subs 看当前订阅。"
 	}
-	mon.SaveToDB()
+	if _, err := persistMonitorChanges(mon); err != nil {
+		return "保存取消订阅操作失败,请检查存储后重试: " + err.Error()
+	}
 	state.Logger.Info("Telegram 取消订阅: "+planCode, "telegram")
 	return "🚫 已取消盯 " + planCode + "\n\n注意：已经在队列里的抢购任务不受影响，发 /queue 查看、/cancel 取消。"
 }

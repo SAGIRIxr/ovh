@@ -1,7 +1,12 @@
 package vps
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -10,8 +15,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/ovh-buy/server/internal/app"
+	"github.com/ovh-buy/server/internal/db"
 	"github.com/ovh-buy/server/internal/notify"
 	"github.com/ovh-buy/server/internal/numconv"
+	"github.com/ovh-buy/server/internal/orderterm"
 	"github.com/ovh-buy/server/internal/ovh"
 	"github.com/ovh-buy/server/internal/types"
 )
@@ -37,7 +44,9 @@ import (
 
 // Outcome 一次下单的结果
 type Outcome struct {
-	Success bool
+	Success   bool
+	Cancelled bool
+	Uncertain bool
 	// Fatal 确定性失败,重试多少次都一样(账户不存在、机型停售、配置非法)
 	Fatal    bool
 	Reason   string
@@ -59,6 +68,34 @@ var dcRegion = map[string]string{
 // PurchaseVPS 在指定机房下单一台 VPS。
 // dcCode 是 OVH 的机房代码(GRA / BHS / US-EAST-VA ...),来自可用性接口。
 func PurchaseVPS(state *app.State, sub types.VPSSubscription, dcCode string) Outcome {
+	return purchaseVPS(context.Background(), state, sub, dcCode)
+}
+
+func purchaseVPS(ctx context.Context, state *app.State, sub types.VPSSubscription, dcCode string) (out Outcome) {
+	checkoutSent := false
+	defer func() {
+		if !checkoutSent && ctx.Err() != nil {
+			out = Outcome{Cancelled: true}
+		}
+	}()
+	if ctx.Err() != nil || !subscriptionCurrent(state, &sub) {
+		return Outcome{Cancelled: true}
+	}
+	if state.DB == nil {
+		return Outcome{Fatal: true, Reason: "数据库不可用,无法安全登记下单请求"}
+	}
+	for _, table := range []string{"history", "vps_subscriptions"} {
+		if err := state.SaveBlocked(table); err != nil {
+			return Outcome{Fatal: true, Reason: err.Error()}
+		}
+	}
+	if found, err := state.DB.GetKV(db.VPSCheckoutKey(sub.ID), &struct {
+		State string `json:"state"`
+	}{}); err != nil {
+		return Outcome{Fatal: true, Reason: "无法核对既有 VPS 结账请求: " + err.Error()}
+	} else if found {
+		return Outcome{Uncertain: true, Reason: "此订阅已有结账记录,请先到 OVH 控制台核对;如需另购请新建订阅"}
+	}
 	if strings.TrimSpace(sub.AutoOrderAccountID) == "" {
 		return Outcome{Fatal: true, Reason: "没有指定下单账户"}
 	}
@@ -67,6 +104,7 @@ func PurchaseVPS(state *app.State, sub types.VPSSubscription, dcCode string) Out
 		// 账户没了 / 凭据缺失 —— 重试一万次也一样
 		return Outcome{Fatal: true, Reason: fmt.Sprintf("账户 %s 不可用: %s", sub.AutoOrderAccountID, err)}
 	}
+	client.Client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	acc, ok := state.FindAccount(sub.AutoOrderAccountID)
 	if !ok {
 		return Outcome{Fatal: true, Reason: "下单账户不存在: " + sub.AutoOrderAccountID}
@@ -88,13 +126,16 @@ func PurchaseVPS(state *app.State, sub types.VPSSubscription, dcCode string) Out
 	if qty < 1 {
 		qty = 1
 	}
+	if qty > types.MaxOrderQuantity {
+		return Outcome{Fatal: true, Reason: "VPS 下单数量超出单次上限"}
+	}
 
 	state.Logger.Info(fmt.Sprintf("[VPS下单] 开始: %s @ %s (子公司 %s, 账户 %s, %d 台)",
 		sub.PlanCode, dcCode, subsidiary, acc.Name, qty), "vps_purchase")
 
 	// 1) 建购物车
 	var cartResult map[string]interface{}
-	if err := client.Post("/order/cart", map[string]interface{}{"ovhSubsidiary": subsidiary}, &cartResult); err != nil {
+	if err := client.PostWithContext(ctx, "/order/cart", map[string]interface{}{"ovhSubsidiary": subsidiary}, &cartResult); err != nil {
 		return Outcome{Reason: "创建购物车失败: " + ovh.Explain(err)}
 	}
 	cartID, _ := cartResult["cartId"].(string)
@@ -109,7 +150,9 @@ func PurchaseVPS(state *app.State, sub types.VPSSubscription, dcCode string) Out
 		if success || cartID == "" {
 			return
 		}
-		if err := client.Delete("/order/cart/"+cartID, nil); err != nil {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := client.DeleteWithContext(cleanupCtx, "/order/cart/"+cartID, nil); err != nil {
 			state.Logger.Debug("[VPS下单] 清理失败 cart "+cartID+": "+err.Error(), "vps_purchase")
 		}
 	}()
@@ -117,21 +160,22 @@ func PurchaseVPS(state *app.State, sub types.VPSSubscription, dcCode string) Out
 	// 2) 绑定购物车。和独服一致:在加商品之前 assign,
 	// 免得 OVH 后端出现"cart 未绑定就 checkout"的边界错误。
 	// 这个端点只有 path 参数、没有 body,传 {} 会被算进签名导致 400。
-	if err := client.Post("/order/cart/"+cartID+"/assign", nil, nil); err != nil {
+	if err := client.PostWithContext(ctx, "/order/cart/"+cartID+"/assign", nil, nil); err != nil {
 		return Outcome{Reason: "绑定购物车失败: " + ovh.Explain(err)}
 	}
 
 	// 3) 加商品。duration / pricingMode 是必填,合法组合来自 GET /order/cart/{id}/vps
-	duration, pricingMode := lookupVPSPricing(state, client, cartID, sub.PlanCode)
-	if duration == "" {
-		// 拉不到就用最常见的月付。硬编码只作为兜底 ——
-		// 真正的取值永远优先问 OVH,因为它会变。
-		duration, pricingMode = "P1M", "default"
-		state.Logger.Warn("[VPS下单] 拉不到计价组合，退回月付 P1M/default", "vps_purchase")
+	selectedDuration, err := orderterm.Normalize(sub.Duration)
+	if err != nil {
+		return Outcome{Fatal: true, Reason: err.Error()}
+	}
+	duration, pricingMode, err := orderterm.Lookup(ctx, client, cartID, "vps", sub.PlanCode, selectedDuration)
+	if err != nil {
+		return Outcome{Fatal: errors.Is(err, orderterm.ErrUnavailable), Reason: err.Error()}
 	}
 
 	var itemResult map[string]interface{}
-	if err := client.Post("/order/cart/"+cartID+"/vps", map[string]interface{}{
+	if err := client.PostWithContext(ctx, "/order/cart/"+cartID+"/vps", map[string]interface{}{
 		"planCode":    sub.PlanCode,
 		"duration":    duration,
 		"pricingMode": pricingMode,
@@ -152,14 +196,19 @@ func PurchaseVPS(state *app.State, sub types.VPSSubscription, dcCode string) Out
 
 	// 4) 必需配置。问购物车要合法取值,不自己猜 ——
 	// 三个站点的 region / 机房取值完全不同,猜的代价是整单失败。
-	required, err := fetchRequiredConfig(client, cartID, itemID)
+	required, err := fetchRequiredConfig(ctx, client, cartID, itemID)
 	if err != nil {
-		state.Logger.Warn("[VPS下单] 拉必需配置失败(按默认继续): "+err.Error(), "vps_purchase")
+		return Outcome{Reason: "读取 VPS 必需配置失败: " + ovh.Explain(err)}
+	}
+	for _, cfg := range required {
+		if cfg.Label == "vps_os" && strings.TrimSpace(sub.OS) != "" && len(cfg.AllowedValues) > 0 && !containsFold(cfg.AllowedValues, sub.OS) {
+			return Outcome{Fatal: true, Reason: "购物车不支持所选 VPS 系统: " + sub.OS}
+		}
 	}
 
 	configs := buildVPSConfig(required, dcCode, sub.OS)
 	for _, cfg := range configs {
-		if err := client.Post(fmt.Sprintf("/order/cart/%s/item/%d/configuration", cartID, itemID),
+		if err := client.PostWithContext(ctx, fmt.Sprintf("/order/cart/%s/item/%d/configuration", cartID, itemID),
 			map[string]interface{}{"label": cfg.label, "value": cfg.value}, nil); err != nil {
 			// 配置项被拒 = 这套组合买不到,重试无用
 			return Outcome{Fatal: true, Reason: fmt.Sprintf(
@@ -168,20 +217,71 @@ func PurchaseVPS(state *app.State, sub types.VPSSubscription, dcCode string) Out
 		state.Logger.Info(fmt.Sprintf("[VPS下单] 配置 %s = %s", cfg.label, cfg.value), "vps_purchase")
 	}
 
+	// 4.5) 必选附加项。2027 系列的 automatedBackup / storage 是 mandatory 家族,
+	// 不加 checkout 就 400 "Addon of type automatedBackup is missing"。
+	// 查询失败时不猜必选项,避免遗漏配置后仍发起结账。
+	var opts []vpsOption
+	if err := client.GetWithContext(ctx, fmt.Sprintf("/order/cart/%s/vps/options?planCode=%s", cartID, url.QueryEscape(sub.PlanCode)), &opts); err != nil {
+		return Outcome{Reason: "读取 VPS 附加项失败: " + ovh.Explain(err)}
+	}
+	addons, missing := pickMandatoryAddons(opts, duration, pricingMode)
+	if len(missing) > 0 {
+		return Outcome{Fatal: true, Reason: fmt.Sprintf(
+			"必选附加项 %v 没有 %s/%s 计价的可选值,这个型号按当前计价方式买不了", missing, duration, pricingMode)}
+	}
+	for _, a := range addons {
+		if err := client.PostWithContext(ctx, fmt.Sprintf("/order/cart/%s/vps/options", cartID), map[string]interface{}{
+			"itemId": itemID, "planCode": a.planCode, "duration": a.duration,
+			"pricingMode": a.pricingMode, "quantity": qty,
+		}, nil); err != nil {
+			return Outcome{Reason: fmt.Sprintf("添加附加项 %s 失败: %s", a.planCode, ovh.Explain(err))}
+		}
+		state.Logger.Info(fmt.Sprintf("[VPS下单] 附加项 %s = %s", a.family, a.planCode), "vps_purchase")
+	}
+
 	// 5) 结账
+	if err := orderterm.VerifyCart(ctx, client, cartID, itemID, selectedDuration); err != nil {
+		return Outcome{Fatal: errors.Is(err, orderterm.ErrCartPeriod), Reason: err.Error()}
+	}
+	currentAccount, accountExists := state.FindAccount(sub.AutoOrderAccountID)
+	if ctx.Err() != nil || !subscriptionCurrent(state, &sub) || !accountExists || !ovh.SameClientConfiguration(currentAccount, acc) || currentAccount.Zone != acc.Zone {
+		return Outcome{Cancelled: true}
+	}
+	claimed, err := state.DB.ClaimVPSCheckout(sub.ID)
+	if err != nil {
+		return Outcome{Fatal: true, Reason: "登记 VPS 结账请求失败,未下单: " + err.Error()}
+	}
+	if !claimed {
+		return Outcome{Uncertain: true, Reason: "此订阅已有结账记录,请到 OVH 控制台核对订单;确认需另购时请新建订阅"}
+	}
+	if ctx.Err() != nil || !subscriptionCurrent(state, &sub) {
+		_ = state.DB.DeleteKV(db.VPSCheckoutKey(sub.ID))
+		return Outcome{Cancelled: true}
+	}
 	var checkoutResult map[string]interface{}
 	// 同独服:不发 waiveRetractationPeriod(放弃 14 天撤回权)。
 	// schema 里它是 required:false,不传即不主动弃权;真要弃权可以事后调
 	// POST /me/order/{id}/waiveRetraction,而结账时传 true 则不可逆。
-	if err := client.Post("/order/cart/"+cartID+"/checkout", map[string]interface{}{
-		// 订阅上显式打开"自动付款"才为 true;默认不替用户扣钱
-		"autoPayWithPreferredPaymentMethod": sub.AutoPay,
+	checkoutSent = true
+	if err := client.PostWithContext(context.WithoutCancel(ctx), "/order/cart/"+cartID+"/checkout", map[string]interface{}{
+		// 自动付款功能已删除:结账永远不使用默认支付方式扣款,由用户在 OVH 订单页自行付款
+		"autoPayWithPreferredPaymentMethod": false,
 	}, &checkoutResult); err != nil {
-		// 配置接口对取值几乎不校验,真正的"这个机房没货"往往到 checkout 才报出来
+		if ovh.CheckoutUncertain(err) {
+			success = true // 保留购物车及登记,不确定的结账不能安全重发。
+			return Outcome{Uncertain: true, Reason: "结账结果不明确,自动下单已停止,请到 OVH 控制台核对订单: " + ovh.Explain(err)}
+		}
+		if releaseErr := state.DB.DeleteKV(db.VPSCheckoutKey(sub.ID)); releaseErr != nil {
+			return Outcome{Uncertain: true, Reason: "结账被拒绝但登记未能清除,请人工核对: " + releaseErr.Error()}
+		}
 		return Outcome{Reason: "结账失败: " + ovh.Explain(err)}
 	}
 
 	orderID := numconv.ToString(checkoutResult["orderId"])
+	if id, err := strconv.ParseInt(orderID, 10, 64); err != nil || id <= 0 {
+		success = true
+		return Outcome{Uncertain: true, Reason: "结账响应缺少有效订单号,自动下单已停止,请到 OVH 控制台核对"}
+	}
 	orderURL, _ := checkoutResult["url"].(string)
 	success = true
 	state.Logger.Info(fmt.Sprintf("[VPS下单] 成功: %s @ %s 订单 %s", sub.PlanCode, dcCode, orderID), "vps_purchase")
@@ -190,6 +290,63 @@ func PurchaseVPS(state *app.State, sub types.VPSSubscription, dcCode string) Out
 
 type kv struct{ label, value string }
 
+// vpsOption GET /order/cart/{id}/vps/options 的一项
+type vpsOption struct {
+	Family    string `json:"family"`
+	Mandatory bool   `json:"mandatory"`
+	PlanCode  string `json:"planCode"`
+	Prices    []struct {
+		Duration    string   `json:"duration"`
+		PricingMode string   `json:"pricingMode"`
+		Capacities  []string `json:"capacities"`
+		Price       struct {
+			Value float64 `json:"value"`
+		} `json:"price"`
+	} `json:"prices"`
+}
+
+type addonPick struct{ family, planCode, duration, pricingMode string }
+
+// pickMandatoryAddons 给每个必选家族挑一个附加项:只看和主商品同 duration/pricingMode
+// 的续费价,取最便宜的(备份就是 1 天保留那档,而不是 7 天)。
+// os 家族跳过 —— 它由 vps_os 配置项决定,再手动加一个 option-linux 会和 Windows 冲突。
+// missing 是有必选家族却挑不出可用项的情况,交给调用方判定失败。
+func pickMandatoryAddons(opts []vpsOption, duration, pricingMode string) (picks []addonPick, missing []string) {
+	type best struct {
+		planCode    string
+		duration    string
+		pricingMode string
+		price       float64
+	}
+	chosen := map[string]*best{}
+	var families []string
+	for _, o := range opts {
+		if !o.Mandatory || o.Family == "" || strings.EqualFold(o.Family, "os") {
+			continue
+		}
+		if _, seen := chosen[o.Family]; !seen {
+			chosen[o.Family] = nil
+			families = append(families, o.Family)
+		}
+		for _, p := range o.Prices {
+			if p.Duration == "" || !orderterm.Same(p.Duration, duration) || p.PricingMode != pricingMode || !containsFold(p.Capacities, "renew") {
+				continue
+			}
+			if b := chosen[o.Family]; b == nil || p.Price.Value < b.price {
+				chosen[o.Family] = &best{o.PlanCode, p.Duration, p.PricingMode, p.Price.Value}
+			}
+		}
+	}
+	for _, f := range families {
+		if b := chosen[f]; b != nil {
+			picks = append(picks, addonPick{f, b.planCode, b.duration, b.pricingMode})
+		} else {
+			missing = append(missing, f)
+		}
+	}
+	return picks, missing
+}
+
 // requiredItem 购物车给出的一个必需配置项
 type requiredItem struct {
 	Label         string   `json:"label"`
@@ -197,9 +354,9 @@ type requiredItem struct {
 	AllowedValues []string `json:"allowedValues"`
 }
 
-func fetchRequiredConfig(client *ovhsdk.Client, cartID string, itemID int64) ([]requiredItem, error) {
+func fetchRequiredConfig(ctx context.Context, client *ovhsdk.Client, cartID string, itemID int64) ([]requiredItem, error) {
 	var out []requiredItem
-	err := client.Get(fmt.Sprintf("/order/cart/%s/item/%d/requiredConfiguration", cartID, itemID), &out)
+	err := client.GetWithContext(ctx, fmt.Sprintf("/order/cart/%s/item/%d/requiredConfiguration", cartID, itemID), &out)
 	return out, err
 }
 
@@ -244,13 +401,33 @@ func buildVPSConfig(required []requiredItem, dcCode, os string) []kv {
 		}
 	}
 
-	// 系统:用户没选就不提交,让 OVH 用默认镜像
-	if os = strings.TrimSpace(os); os != "" {
-		if r, ok := byLabel["vps_os"]; !ok || len(r.AllowedValues) == 0 || containsFold(r.AllowedValues, os) {
+	// 系统:requiredConfiguration 里 vps_os 标的是 required:false,但 checkout 不给它
+	// 就 400 "Missing parameter(s): vps_os or vps_backupid is required" ——
+	// 根本没有"OVH 默认镜像"这回事。用户没选时从购物车允许的列表里挑一个。
+	os = strings.TrimSpace(os)
+	r, hasOS := byLabel["vps_os"]
+	if os == "" && hasOS {
+		os = defaultVPSOS(r.AllowedValues)
+	}
+	if os != "" {
+		if !hasOS || len(r.AllowedValues) == 0 || containsFold(r.AllowedValues, os) {
 			out = append(out, kv{"vps_os", os})
 		}
 	}
 	return out
+}
+
+// defaultVPSOS 用户没选系统时的兜底:按偏好顺序挑购物车里有的,都没有就取第一个
+func defaultVPSOS(allowed []string) string {
+	for _, want := range []string{"Debian 13", "Debian 12", "Ubuntu 24.04"} {
+		if containsFold(allowed, want) {
+			return want
+		}
+	}
+	if len(allowed) > 0 {
+		return allowed[0]
+	}
+	return ""
 }
 
 func containsFold(list []string, want string) bool {
@@ -262,56 +439,16 @@ func containsFold(list []string, want string) bool {
 	return false
 }
 
-// lookupVPSPricing 从 GET /order/cart/{id}/vps 里找这个 planCode 的月付组合。
-// 优先月付(mode=default):抢购要的是尽快拿到机器,不是替用户决定包年。
-func lookupVPSPricing(state *app.State, client *ovhsdk.Client, cartID, planCode string) (string, string) {
-	var defs []struct {
-		PlanCode string `json:"planCode"`
-		Prices   []struct {
-			Duration    string   `json:"duration"`
-			PricingMode string   `json:"pricingMode"`
-			Capacities  []string `json:"capacities"`
-		} `json:"prices"`
-	}
-	if err := client.Get("/order/cart/"+cartID+"/vps", &defs); err != nil {
-		state.Logger.Debug("[VPS下单] 拉计价失败: "+err.Error(), "vps_purchase")
-		return "", ""
-	}
-	for _, d := range defs {
-		if !strings.EqualFold(d.PlanCode, planCode) {
-			continue
-		}
-		// 先找月付
-		for _, p := range d.Prices {
-			if p.PricingMode == "default" && p.Duration == "P1M" {
-				return p.Duration, p.PricingMode
-			}
-		}
-		// 没有就用第一个能续费的
-		for _, p := range d.Prices {
-			for _, c := range p.Capacities {
-				if c == "renew" {
-					return p.Duration, p.PricingMode
-				}
-			}
-		}
-		if len(d.Prices) > 0 {
-			return d.Prices[0].Duration, d.Prices[0].PricingMode
-		}
-	}
-	return "", ""
-}
-
 // recordVPSPurchase 把下单结果写进抢购历史,和独服共用一张表 ——
 // 用户不关心"这是独服还是 VPS 的历史",只关心"我到底买到了什么"。
-func recordVPSPurchase(state *app.State, sub types.VPSSubscription, dcCode string, out Outcome) {
+func recordVPSPurchase(state *app.State, sub types.VPSSubscription, dcCode string, out Outcome) error {
 	state.HistoryMu.Lock()
-	defer state.HistoryMu.Unlock()
 	entry := types.PurchaseHistoryEntry{
 		ID:           uuid.NewString(),
 		TaskID:       "vps:" + sub.ID,
 		AccountID:    sub.AutoOrderAccountID,
 		PlanCode:     sub.PlanCode,
+		Duration:     sub.Duration,
 		Datacenter:   dcCode,
 		Options:      []string{},
 		PurchaseTime: types.NowISO(),
@@ -323,20 +460,22 @@ func recordVPSPurchase(state *app.State, sub types.VPSSubscription, dcCode strin
 		entry.OrderURL = out.OrderURL
 	} else {
 		entry.Status = "failed"
+		if out.Uncertain {
+			entry.Status = "uncertain"
+		}
 		reason := out.Reason
 		entry.ErrorMessage = &reason
 	}
 	state.History = append(state.History, entry)
-	// 注意:defer 的 Unlock 先执行,SaveHistory 在锁外(它自己拿 HistoryMu 快照,
-	// 持锁同步调会死锁 —— 见独服 recordSuccess 的同款修复)。这里保持异步:
-	// VPS 购买路径一次只一条,上面的 120s 闸门在崩溃重放时兜底
+	state.HistoryMu.Unlock()
+	return state.SaveHistory()
 }
 
 // autoOrderOnRestock 补货时自动下单。
 // 只对"从无货变成有货"的机房下单 —— 首次检查发现的存量不算补货,
 // 那可能是一台挂了几个月的订阅刚启动,用户并没打算现在就买。
-func autoOrderOnRestock(state *app.State, sub types.VPSSubscription, dcs []map[string]interface{}) {
-	if !sub.AutoOrder || strings.TrimSpace(sub.AutoOrderAccountID) == "" {
+func autoOrderOnRestock(ctx context.Context, state *app.State, sub types.VPSSubscription, dcs []map[string]interface{}) {
+	if !sub.AutoOrder || strings.TrimSpace(sub.AutoOrderAccountID) == "" || ctx.Err() != nil || !subscriptionCurrent(state, &sub) {
 		return
 	}
 	// 同独服 quick-order 的 120 秒近期成功闸门:VPS 库存自然抖动
@@ -347,6 +486,11 @@ func autoOrderOnRestock(state *app.State, sub types.VPSSubscription, dcs []map[s
 	nowTS := time.Now().Unix()
 	for i := len(state.History) - 1; i >= 0; i-- {
 		h := &state.History[i]
+		if h.TaskID == "vps:"+sub.ID && h.Status == "success" && h.OrderID != "" {
+			state.HistoryMu.Unlock()
+			disableAutoOrder(state, sub)
+			return
+		}
 		if h.PlanCode == sub.PlanCode && h.Status == "success" && h.AccountID == sub.AutoOrderAccountID {
 			if t, ok := types.ParseTS(h.PurchaseTime); ok && nowTS-t.Unix() < 120 {
 				state.HistoryMu.Unlock()
@@ -357,43 +501,72 @@ func autoOrderOnRestock(state *app.State, sub types.VPSSubscription, dcs []map[s
 	}
 	state.HistoryMu.Unlock()
 	for _, dc := range dcs {
-		code, _ := dc["code"].(string)
+		if ctx.Err() != nil || !subscriptionCurrent(state, &sub) {
+			return
+		}
+		// 可用性接口每个机房给两个名字:code 是 eu-west-lim 这种新长码,
+		// datacenter(这里存成 name)是 DE / GRA / EU-WEST-LZ-AMS 这种短名。
+		// 购物车的 vps_datacenter 只认短名 —— 交长码 checkout 直接 400
+		// "Invalid VPS datacenter 'EU-WEST-LIM'"。LIM→DE、ERI→UK、MUM→YNM
+		// 这几个连大写都对不上,只能用 OVH 自己给的那个字段。
+		code, _ := dc["name"].(string)
+		if code == "" {
+			code, _ = dc["code"].(string)
+		}
 		if code == "" {
 			continue
 		}
-		out := PurchaseVPS(state, sub, code)
-		recordVPSPurchase(state, sub, code, out)
+		out := purchaseVPS(ctx, state, sub, code)
+		if out.Cancelled {
+			return
+		}
+		if err := recordVPSPurchase(state, sub, code, out); err != nil {
+			disableAutoOrder(state, sub)
+			state.Logger.Error("保存 VPS 下单结果失败,已停止自动下单: "+err.Error(), "vps_purchase")
+			out.Fatal = true
+			out.Reason += "；结果保存失败,自动下单已停止,请人工核对订单"
+		}
+		if out.Success || out.Uncertain || out.Fatal {
+			disableAutoOrder(state, sub)
+		}
 
 		if out.Success {
 			// 同独服:checkout 是 autoPayWithPreferredPaymentMethod:false,
 			// "成功"= 订单已创建、未付款、逾期作废。通知里必须说清楚。
 			payNote := "⚠️ 订单尚未付款：请尽快打开订单链接完成付款,逾期未付订单会自动作废。\n" +
-				"(订单未付款前处于 14 天撤销期内,可在 OVH 订单页撤回)"
-			if sub.AutoPay {
-				payNote = "💳 已请求用账户默认支付方式自动付款,请打开订单链接核对扣款是否成功。\n" +
-					"(订单未付款前处于 14 天撤销期内,可在 OVH 订单页撤回)"
-			}
+				"(撤回资格与退款金额以 OVH 订单页面显示为准)"
 			// 同独服:通知里发需要登录的控制面板深链,不发 checkout 那个带凭证的 url。
 			// 带凭证那份存在本地历史里,界面上照样一键可付。
-			linkURL := out.OrderURL
+			linkURL := "请在 OVH 控制台 → 账单 → 订单 中查看"
 			if acc, ok := state.FindAccount(sub.AutoOrderAccountID); ok {
 				if u := ovh.ManagerOrderURL(acc.Endpoint, out.OrderID); u != "" {
 					linkURL = u
 				}
 			}
-			msg := fmt.Sprintf("🎉 VPS 下单成功\n\n型号: %s\n机房: %s\n订单: %s\n%s\n\n%s",
-				sub.PlanCode, code, out.OrderID, linkURL, payNote)
+			msg := fmt.Sprintf("🎉 VPS 下单成功\n\n型号: %s\n机房: %s\n购买时长: %s\n订单: %s\n%s\n\n%s",
+				sub.PlanCode, code, orderterm.Label(sub.Duration), out.OrderID, linkURL, payNote)
+			if out.Reason != "" {
+				msg += "\n⚠️ " + out.Reason
+			}
 			notify.Broadcast(state, msg, nil)
 			// 抢到就停:订阅是"盯着补货",不是"把所有机房都买一遍"
 			return
 		}
 		state.Logger.Error(fmt.Sprintf("[VPS下单] %s @ %s 失败: %s", sub.PlanCode, code, out.Reason), "vps_purchase")
-		notify.Broadcast(state, fmt.Sprintf("⚠️ VPS 自动下单失败\n\n型号: %s\n机房: %s\n原因: %s",
+		title := "VPS 自动下单失败"
+		if out.Uncertain {
+			title = "VPS 下单结果待核对（自动下单已停止）"
+		}
+		notify.Broadcast(state, fmt.Sprintf("⚠️ %s\n\n型号: %s\n机房: %s\n原因: %s", title,
 			sub.PlanCode, code, out.Reason), nil)
-		if out.Fatal {
+		if out.Fatal || out.Uncertain {
 			// 确定性失败:换个机房也是同样结果,别再刷了
 			return
 		}
-		time.Sleep(500 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(500 * time.Millisecond):
+		}
 	}
 }

@@ -30,14 +30,17 @@ type ConfigAvailability struct {
 	// "这个配置确实没有可匹配 addon",否则会把 OVH 瞬断报成"该机房无可定价配置"。
 	CatalogError string `json:"catalogError,omitempty"`
 	// CatalogMissing:目录拉到了,但这个 planCode 不在该账户子公司的目录里。
-	// 与 CatalogError(网络/OVH 故障,重试有用)必须分开:这种情况重试一万次也没用,
-	// 是拿错区的 planCode 了 —— 美区目录的机型一律带 -us/-ca/-eu/-sgp 后缀
-	// (US 143 个 plan 全部带后缀,欧区的裸 planCode 在美区目录里根本不存在)。
+	// 可能是预上架、其他产品系列或地区不同,不能直接当成跨区错误。
 	CatalogMissing bool `json:"catalogMissing,omitempty"`
 	// OptionsNote:目录和 planCode 都在,但这一条 FQN 的内存/存储在该子公司目录里
 	// 没有对应 addon(实测 US 35 条、EU/CA 各 18 条)。这类配置在本子公司买不到,
 	// 不是"目录挂了",调用方应该照实说而不是报错。
 	OptionsNote string `json:"optionsNote,omitempty"`
+}
+
+// AwaitingCatalog 与预订判定使用同一 Eco 系列范围;其他系列仍保留库存通知。
+func (c *ConfigAvailability) AwaitingCatalog(planCode string) bool {
+	return c.CatalogMissing && ecoStockPlanCode.MatchString(planCode)
 }
 
 // ErrPlanNotInRegion:该 planCode 在这个账户所属站点没有任何可用性记录。
@@ -77,12 +80,8 @@ func CheckServerAvailabilityWithConfigs(state *app.State, planCode string, accou
 
 	state.Logger.Info(fmt.Sprintf("[配置监控] 查询 %s 的所有配置组合(%s 站点 / 子公司 %s)...", planCode, region, subsidiary), "monitor")
 
-	q := url.Values{}
-	q.Set("planCode", planCode)
 	observation, err := state.StockSignals.Fetch(context.Background(), acc.ID, planCode, func() ([]map[string]interface{}, error) {
-		var variants []map[string]interface{}
-		err := client.Get("/dedicated/server/datacenter/availabilities?"+q.Encode(), &variants)
-		return variants, err
+		return ovh.GetAvailabilities(context.Background(), client, planCode)
 	})
 	if err != nil {
 		state.Logger.Error("读取库存失败: "+err.Error(), "monitor")
@@ -111,13 +110,13 @@ func CheckServerAvailabilityWithConfigs(state *app.State, planCode string, accou
 	catalogMissing := false
 	if addonErr != nil {
 		catalogErr = addonErr.Error()
-		// "目录里没有这个 planCode" 和 "目录拉取失败" 是两码事:前者是跨区拿错 planCode,
-		// 重试无用,得换带本区后缀的机型;后者是 OVH/网络瞬断,重试就好。
+		// 目录缺失也可能是预上架或非 Eco 系列,不能据此断言跨区;
+		// 与目录请求失败分开,供调用方决定等待开售或提示诊断。
 		// 调用方(quick_order / telegram)据此给用户不同的提示。
 		catalogMissing = errors.Is(addonErr, ErrPlanNotInCatalog)
 		if catalogMissing {
-			catalogErr = fmt.Sprintf("%s 子公司(%s 站点)的目录里没有 planCode %s —— "+
-				"三个站点的目录互不相通,美区机型带 -us/-ca/-eu/-sgp 后缀,请换本区的 planCode",
+			catalogErr = fmt.Sprintf("%s 子公司(%s 站点)的销售目录尚不包含 planCode %s；"+
+				"预上架机型需等待开售,也请确认账户地区及产品系列。库存记录本身不代表当前账户可以下单",
 				subsidiary, region, planCode)
 			state.Logger.Warn("[配置监控] "+catalogErr, "monitor")
 		} else {
@@ -389,10 +388,8 @@ func CheckServerAvailability(state *app.State, planCode string, options []string
 
 	state.Logger.Info(fmt.Sprintf("查询 %s 的可用性...", planCode), "")
 
-	var availabilities []map[string]interface{}
-	q := url.Values{}
-	q.Set("planCode", planCode)
-	if err := client.Get("/dedicated/server/datacenter/availabilities?"+q.Encode(), &availabilities); err != nil {
+	availabilities, err := ovh.GetAvailabilities(context.Background(), client, planCode)
+	if err != nil {
 		state.Logger.Error(fmt.Sprintf("Failed to check availability for %s: %s", planCode, err.Error()), "")
 		return nil, err
 	}
@@ -687,12 +684,23 @@ func LoadServerList(state *app.State, accountID string) ([]types.ServerPlan, int
 	}
 
 	plans, _ := catalogResp["plans"].([]interface{})
+	products := map[string]map[string]interface{}{}
+	if entries, ok := catalogResp["products"].([]interface{}); ok {
+		for _, raw := range entries {
+			if product, ok := raw.(map[string]interface{}); ok {
+				if name := getString(product, "name", ""); name != "" {
+					products[name] = product
+				}
+			}
+		}
+	}
 	result := []types.ServerPlan{}
 
 	// 并发预拉所有 plan 的 availabilities（这是循环里唯一的网络 IO）
 	// 96 个 plan × 200ms 串行 = 20 秒；改 15 并发 ≈ 1.5 秒
 	type availEntry struct {
 		availabilities []map[string]interface{}
+		failed         bool
 	}
 	availByPlan := make(map[string]*availEntry, len(plans))
 	var availMu sync.Mutex
@@ -715,21 +723,19 @@ func LoadServerList(state *app.State, accountID string) ([]types.ServerPlan, int
 		go func(planCode string) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			var avs []map[string]interface{}
-			q := url.Values{}
-			q.Set("planCode", planCode)
-			err := client.Get("/dedicated/server/datacenter/availabilities?"+q.Encode(), &avs)
+			// 库存接口官方免鉴权:不签名,不占账户鉴权额度
+			avs, err := ovh.GetAvailabilities(context.Background(), client, planCode)
 			if err != nil {
 				// 限流/瞬断退避重试一次,仍失败才计入失败数
 				time.Sleep(500 * time.Millisecond)
-				err = client.Get("/dedicated/server/datacenter/availabilities?"+q.Encode(), &avs)
+				avs, err = ovh.GetAvailabilities(context.Background(), client, planCode)
 			}
 			availMu.Lock()
 			if err != nil {
 				availFailed++
 				state.Logger.Warn(fmt.Sprintf("预拉 %s 的可用性失败: %s（该机型的机房列表将为空）", planCode, err.Error()), "")
 			}
-			availByPlan[planCode] = &availEntry{availabilities: avs}
+			availByPlan[planCode] = &availEntry{availabilities: avs, failed: err != nil}
 			availMu.Unlock()
 		}(pc)
 	}
@@ -754,8 +760,10 @@ func LoadServerList(state *app.State, accountID string) ([]types.ServerPlan, int
 		// 从预拉结果取（保持串行解析以确保 1:1）
 		datacenters := []types.Datacenter{}
 		var availabilities []map[string]interface{}
+		stockStale := false
 		if entry, ok := availByPlan[planCode]; ok {
 			availabilities = entry.availabilities
+			stockStale = entry.failed
 		}
 		for _, item := range availabilities {
 			if dcsRaw, ok := item["datacenters"].([]interface{}); ok {
@@ -785,11 +793,18 @@ func LoadServerList(state *app.State, accountID string) ([]types.ServerPlan, int
 			}
 		}
 
+		var product map[string]interface{}
+		switch ref := plan["product"].(type) {
+		case string:
+			product = products[ref]
+		case map[string]interface{}:
+			product = ref
+		}
 		serverInfo := types.ServerPlan{
 			PlanCode:         planCode,
 			Name:             getString(plan, "invoiceName", ""),
 			Description:      getString(plan, "description", ""),
-			CPU:              "N/A",
+			CPU:              productCPU(product),
 			Memory:           "N/A",
 			Storage:          "N/A",
 			Bandwidth:        "N/A",
@@ -797,69 +812,6 @@ func LoadServerList(state *app.State, accountID string) ([]types.ServerPlan, int
 			Datacenters:      datacenters,
 			DefaultOptions:   []types.ServerOption{},
 			AvailableOptions: []types.ServerOption{},
-		}
-
-		// 特殊系列：SYSLE / SK
-		lcPlan := strings.ToLower(planCode)
-		if strings.Contains(lcPlan, "sysle") {
-			state.Logger.Info(fmt.Sprintf("检测到SYSLE系列服务器: %s", planCode), "")
-			switch {
-			case strings.Contains(planCode, "011"):
-				serverInfo.CPU = "SYSLE 011系列 (入门级服务器CPU)"
-			case strings.Contains(planCode, "021"):
-				serverInfo.CPU = "SYSLE 021系列 (中端服务器CPU)"
-			case strings.Contains(planCode, "031"):
-				serverInfo.CPU = "SYSLE 031系列 (高端服务器CPU)"
-			default:
-				serverInfo.CPU = "SYSLE系列CPU"
-			}
-			extractCPUFromNames(plan, &serverInfo, state)
-		} else if strings.Contains(lcPlan, "sk") {
-			state.Logger.Info(fmt.Sprintf("检测到SK系列服务器: %s", planCode), "")
-			displayName := getString(plan, "displayName", "")
-			invoiceName := getString(plan, "invoiceName", "")
-			description := getString(plan, "description", "")
-			foundCPU := false
-			for _, name := range []string{displayName, invoiceName, description} {
-				if name == "" {
-					continue
-				}
-				if strings.Contains(name, "|") {
-					parts := strings.SplitN(name, "|", 2)
-					if len(parts) > 1 {
-						cpuPart := strings.TrimSpace(parts[1])
-						lc := strings.ToLower(cpuPart)
-						if strings.Contains(lc, "intel") || strings.Contains(lc, "amd") || strings.Contains(lc, "xeon") || strings.Contains(lc, "i7") {
-							serverInfo.CPU = cpuPart
-							state.Logger.Info(fmt.Sprintf("从名称中提取CPU型号: %s 给 %s", cpuPart, planCode), "")
-							foundCPU = true
-						}
-					}
-				}
-				if foundCPU {
-					break
-				}
-			}
-			if !foundCPU {
-				serverInfo.CPU = "SK系列专用CPU"
-			}
-		}
-
-		if serverInfo.CPU == "N/A" {
-			state.Logger.Info(fmt.Sprintf("服务器 %s 无法从API提取CPU信息，尝试从名称提取", planCode), "")
-			extractCPUFromNames(plan, &serverInfo, state)
-			if serverInfo.CPU == "N/A" {
-				switch {
-				case strings.Contains(lcPlan, "sysle"):
-					serverInfo.CPU = "SYSLE系列专用CPU"
-				case strings.Contains(lcPlan, "rise"):
-					serverInfo.CPU = "RISE系列专用CPU"
-				case strings.Contains(lcPlan, "game"):
-					serverInfo.CPU = "GAME系列专用CPU"
-				default:
-					serverInfo.CPU = "专用服务器CPU"
-				}
-			}
 		}
 
 		if serverInfo.Name == "" {
@@ -981,8 +933,8 @@ func LoadServerList(state *app.State, accountID string) ([]types.ServerPlan, int
 			}
 		}
 
-		// 解析方法 3: 从 plan.product.configurations 提取
-		if product, ok := plan["product"].(map[string]interface{}); ok {
+		// 解析方法 3: 从关联 product 的 configurations 提取。
+		if product != nil {
 			if cfgs, ok := product["configurations"].([]interface{}); ok {
 				for _, cRaw := range cfgs {
 					cfg, ok := cRaw.(map[string]interface{})
@@ -1014,12 +966,6 @@ func LoadServerList(state *app.State, accountID string) ([]types.ServerPlan, int
 				part = strings.ToLower(strings.TrimSpace(part))
 				if part == "" {
 					continue
-				}
-				hasCPU := strings.Contains(part, "cpu") || strings.Contains(part, "core") ||
-					strings.Contains(part, "i7") || strings.Contains(part, "i9") ||
-					strings.Contains(part, "xeon") || strings.Contains(part, "epyc") || strings.Contains(part, "ryzen")
-				if serverInfo.CPU == "N/A" && hasCPU {
-					serverInfo.CPU = part
 				}
 				if serverInfo.Memory == "N/A" && (strings.Contains(part, "ram") || strings.Contains(part, "gb") || strings.Contains(part, "memory")) {
 					serverInfo.Memory = part
@@ -1094,6 +1040,10 @@ func LoadServerList(state *app.State, accountID string) ([]types.ServerPlan, int
 			}
 		}
 
+		if serverInfo.CPU == "N/A" {
+			extractCPUFromNames(plan, &serverInfo, state)
+		}
+		serverInfo.StockStale = stockStale
 		result = append(result, serverInfo)
 	}
 
@@ -1161,26 +1111,11 @@ func extractCPUFromNames(plan map[string]interface{}, info *types.ServerPlan, st
 	displayName := getString(plan, "displayName", "")
 	invoiceName := getString(plan, "invoiceName", "")
 	description := getString(plan, "description", "")
-	cpuKeywords := []string{"i7-", "i9-", "i5-", "xeon", "epyc", "ryzen"}
 	for _, name := range []string{displayName, invoiceName, description} {
-		if name == "" {
-			continue
-		}
-		lcName := strings.ToLower(name)
-		for _, kw := range cpuKeywords {
-			if strings.Contains(lcName, kw) {
-				pos := strings.Index(lcName, kw)
-				end := pos + 30
-				if end > len(name) {
-					end = len(name)
-				}
-				cpuInfo := strings.TrimSpace(strings.Split(name[pos:end], ",")[0])
-				if cpuInfo != "" {
-					info.CPU = cpuInfo
-					state.Logger.Info(fmt.Sprintf("从关键词中提取CPU型号: %s 给 %s", cpuInfo, info.PlanCode), "")
-					return
-				}
-			}
+		if cpu := cpuFromText(name); cpu != "" {
+			info.CPU = cpu
+			state.Logger.Info(fmt.Sprintf("从名称中提取CPU型号: %s 给 %s", cpu, info.PlanCode), "")
+			return
 		}
 	}
 }

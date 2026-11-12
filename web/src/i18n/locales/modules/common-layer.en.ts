@@ -134,6 +134,7 @@ const pack: CommonLayerPack = {
     },
   },
   commons: {
+    templateResponseInvalid: "Invalid OS template response. Refresh and try again.",
     theme: {
       system: "System",
       light: "Light",
@@ -231,17 +232,17 @@ const pack: CommonLayerPack = {
       title: "API key required",
       subtitle: "Verify your identity before accessing the backend",
       keyLabel: "API key",
-      keyPlaceholder: "The X-API-Key from the backend config file / environment",
+      keyPlaceholder: "API_SECRET_KEY or the key in the data directory's .api-secret",
       verifying: "Verifying…",
       waitSeconds: "Wait {{count}}s",
       submit: "Verify and continue",
       storageNote:
-        "The key is kept in the browser's localStorage and never sent to a server. Switching devices or clearing the cache requires re-entering it.",
+        "The key is saved in this browser and sent to the current backend for authentication. Switching devices or clearing the cache requires re-entering it.",
       networkError: "network error",
       unreachable:
         "Cannot reach the backend service ({{reason}}). Make sure the backend is running and the address/port are correct, then retry.",
       badKey:
-        "Wrong key. It is the API_SECRET_KEY from the backend's .env file; if it was never set the default is 123456 (strongly recommended to change).",
+        "Wrong key. Check the backend's API_SECRET_KEY setting. If unset, read the generated random key from .api-secret in the data directory.",
       rateLimited: "Too many consecutive wrong keys — try again in about {{secs}}s.",
       unexpectedStatus:
         "The backend answered with HTTP {{status}}, which is not the expected response. Make sure no reverse proxy or login page is intercepting it.",
@@ -266,6 +267,16 @@ const pack: CommonLayerPack = {
       upToDate: "Up to date v{{version}}",
     },
     timing: {
+      dispatch: "Detect→send {{value}}",
+      dispatchTitle: "Time from seeing orderable stock to sending the checkout request",
+      prewarmed: "cart prepared in advance",
+      reused: "connection reused",
+      waitTitle: "From creating the task to winning the order",
+      waitS: "waited {{s}}s",
+      waitM: "waited {{m}}m {{s}}s",
+      waitH: "waited {{h}}h {{m}}m",
+      waitD: "waited {{d}}d {{h}}h",
+      phaseNames: {"复用已核验配置": "Reuse verified configuration", "复用已配置购物车": "Resume configured cart", "复用已绑定空车": "Reuse assigned empty cart", "查库存": "Check stock", "建购物车": "Create cart", "绑定购物车": "Assign cart", "加购商品": "Add server", "必需配置": "Required configuration", "加硬件选项": "Add hardware options", "应用优惠码": "Apply coupon", "下单": "Checkout"},
       totalToast: "This order took {{total}} in total",
       detailToast: "Total {{total}}\n{{breakdown}}",
       titleSlowest: "Tap for per-phase timings (slowest: {{name}} {{ms}})",
@@ -409,6 +420,9 @@ const pack: CommonLayerPack = {
     },
   },
   shell: {
+    tabbar: "Main pages",
+    more: "More",
+    runningTasks: "{{n}} tasks running",
     closeMenu: "Close menu",
     prevPage: "Previous",
     nextPage: "Next",

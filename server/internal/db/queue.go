@@ -9,6 +9,7 @@ import (
 
 // queueRow 是表结构的一一对应（snake_case 列名 + JSON 列做 string）
 type queueRow struct {
+	Duration           string  `db:"duration"`
 	ID                 string  `db:"id"`
 	AccountID          string  `db:"account_id"`
 	PlanCode           string  `db:"plan_code"`
@@ -26,20 +27,29 @@ type queueRow struct {
 	Priority           int     `db:"priority"`
 	FromTelegram       int     `db:"from_telegram"`
 	ConfigSniperTaskID string  `db:"config_sniper_task_id"`
-	AutoPay            int     `db:"auto_pay"`
-	Preorder           int     `db:"preorder"`
-	Coupon             string  `db:"coupon"`
-	ForceOrder         int     `db:"force_order"`
-	CouponFallback     int     `db:"coupon_fallback"`
-	UncertainCheckout  int     `db:"uncertain_checkout"`
-	UncertainTime      string  `db:"uncertain_time"`
-	FQN                string  `db:"fqn"`
+	// AutoPay 旧版「自动付款」列,功能已删除:读取时忽略,写入恒为 0(清掉旧值)
+	AutoPay           int    `db:"auto_pay"`
+	Preorder          int    `db:"preorder"`
+	PreorderWaitStock int    `db:"preorder_wait_stock"`
+	Coupon            string `db:"coupon"`
+	OrderGroup        string `db:"order_group"`
+	GroupLimit        int    `db:"group_limit"`
+	StopReason        string `db:"stop_reason"`
+	ForceOrder        int    `db:"force_order"`
+	FQN               string `db:"fqn"`
+	// 下面三列属于已删除的功能(优惠码被拒仍付款 / 结账未决标记,前者随自动付款一起删,
+	// 后者由上游的订单核对取代)。老库里有这些列,SELECT * 严格映射必须留着字段;写入恒为零值
+	CouponFallback    int    `db:"coupon_fallback"`
+	UncertainCheckout int    `db:"uncertain_checkout"`
+	UncertainTime     string `db:"uncertain_time"`
 }
 
-func rowToQueueItem(r queueRow) types.QueueItem {
+func rowToQueueItem(r queueRow) (types.QueueItem, error) {
 	var opts []string
 	if r.OptionsJSON != "" {
-		_ = json.Unmarshal([]byte(r.OptionsJSON), &opts)
+		if err := json.Unmarshal([]byte(r.OptionsJSON), &opts); err != nil {
+			return types.QueueItem{}, fmt.Errorf("queue %s options: %w", r.ID, err)
+		}
 	}
 	if opts == nil {
 		opts = []string{}
@@ -47,6 +57,7 @@ func rowToQueueItem(r queueRow) types.QueueItem {
 	return types.QueueItem{
 		ID:                 r.ID,
 		AccountID:          r.AccountID,
+		Duration:           r.Duration,
 		PlanCode:           r.PlanCode,
 		Datacenter:         r.Datacenter,
 		Options:            opts,
@@ -62,15 +73,15 @@ func rowToQueueItem(r queueRow) types.QueueItem {
 		Priority:           r.Priority,
 		FromTelegram:       r.FromTelegram == 1,
 		ConfigSniperTaskID: r.ConfigSniperTaskID,
-		AutoPay:            r.AutoPay == 1,
 		Preorder:           r.Preorder == 1,
+		PreorderWaitStock:  r.Preorder == 1 && r.PreorderWaitStock == 1,
 		Coupon:             r.Coupon,
+		OrderGroup:         r.OrderGroup,
+		GroupLimit:         r.GroupLimit,
+		StopReason:         r.StopReason,
 		Force:              r.ForceOrder == 1,
-		CouponFallback:     r.CouponFallback == 1,
 		FQN:                r.FQN,
-		UncertainCheckout:  r.UncertainCheckout == 1,
-		UncertainTime:      r.UncertainTime,
-	}
+	}, nil
 }
 
 func queueItemToRow(q types.QueueItem) (queueRow, error) {
@@ -90,6 +101,7 @@ func queueItemToRow(q types.QueueItem) (queueRow, error) {
 	return queueRow{
 		ID:                 q.ID,
 		AccountID:          q.AccountID,
+		Duration:           q.Duration,
 		PlanCode:           q.PlanCode,
 		Datacenter:         q.Datacenter,
 		OptionsJSON:        string(optsJSON),
@@ -105,14 +117,14 @@ func queueItemToRow(q types.QueueItem) (queueRow, error) {
 		Priority:           q.Priority,
 		FromTelegram:       bi(q.FromTelegram),
 		ConfigSniperTaskID: q.ConfigSniperTaskID,
-		AutoPay:            bi(q.AutoPay),
 		Preorder:           bi(q.Preorder),
+		PreorderWaitStock:  bi(q.Preorder && q.PreorderWaitStock),
 		Coupon:             q.Coupon,
+		OrderGroup:         q.OrderGroup,
+		GroupLimit:         q.GroupLimit,
+		StopReason:         q.StopReason,
 		ForceOrder:         bi(q.Force),
-		CouponFallback:     bi(q.CouponFallback),
 		FQN:                q.FQN,
-		UncertainCheckout:  bi(q.UncertainCheckout),
-		UncertainTime:      q.UncertainTime,
 	}, nil
 }
 
@@ -124,7 +136,11 @@ func (db *DB) ListQueue() ([]types.QueueItem, error) {
 	}
 	out := make([]types.QueueItem, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, rowToQueueItem(r))
+		item, err := rowToQueueItem(r)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, item)
 	}
 	return out, nil
 }
@@ -147,15 +163,15 @@ func (db *DB) ReplaceQueue(items []types.QueueItem) error {
 		}
 		_, err = tx.NamedExec(`
 			INSERT INTO queue
-			(id, account_id, plan_code, datacenter, options, status, created_at, updated_at,
+			(id, account_id, duration, plan_code, datacenter, options, status, created_at, updated_at,
 			 retry_interval, retry_count, failure_count, max_retries, last_check_time,
-			 quick_order, priority, from_telegram, config_sniper_task_id, auto_pay, preorder, coupon,
-			 force_order, coupon_fallback, uncertain_checkout, uncertain_time, fqn)
+			 quick_order, priority, from_telegram, config_sniper_task_id, auto_pay, preorder, preorder_wait_stock, coupon, order_group, group_limit, stop_reason,
+			 force_order, fqn, coupon_fallback, uncertain_checkout, uncertain_time)
 			VALUES
-			(:id, :account_id, :plan_code, :datacenter, :options, :status, :created_at, :updated_at,
+			(:id, :account_id, :duration, :plan_code, :datacenter, :options, :status, :created_at, :updated_at,
 			 :retry_interval, :retry_count, :failure_count, :max_retries, :last_check_time,
-			 :quick_order, :priority, :from_telegram, :config_sniper_task_id, :auto_pay, :preorder, :coupon,
-			 :force_order, :coupon_fallback, :uncertain_checkout, :uncertain_time, :fqn)
+			 :quick_order, :priority, :from_telegram, :config_sniper_task_id, :auto_pay, :preorder, :preorder_wait_stock, :coupon, :order_group, :group_limit, :stop_reason,
+			 :force_order, :fqn, :coupon_fallback, :uncertain_checkout, :uncertain_time)
 		`, r)
 		if err != nil {
 			return fmt.Errorf("insert queue %s: %w", q.ID, err)

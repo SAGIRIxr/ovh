@@ -91,14 +91,13 @@ func GetServers(state *app.State) gin.HandlerFunc {
 			// 否则切到 US 账户仍然看到默认(EU)账户子公司的机型集合
 			apiServers, availFailed := catalog.LoadServerList(state, reqAccount)
 			if len(apiServers) > 0 && availFailed > 0 && len(cached) > 0 {
-				// 部分 plan 的可用性没拉到(多半是 OVH 限流),这份结果的机房列是残缺的。
-				// 用它覆盖缓存 + SQLite 会让用户在整个 TTL 内看到"全线无货",宁可继续用旧缓存。
-				serverPlans = cached
-				// 只有缓存真的过期了才算"用过期数据":forceRefresh 时缓存往往还在 TTL 内,
-				// 这时回一条"Using expired cache"告警是假警报
-				usingExpiredCache = !valid
-				state.Logger.Warn("⚠️ 本次刷新有 "+strconv.Itoa(availFailed)+" 个机型的可用性拉取失败，结果不完整，保留旧缓存", "")
-			} else if len(apiServers) > 0 {
+				// 部分 plan 的可用性没拉到(多半是 OVH 限流)。以前整份丢弃、继续用旧缓存且不更新时间戳,
+				// 只要每次刷新都有个别型号失败,缓存就永远停在几天前。现在保留新目录,
+				// 只给失败的型号沿用旧缓存里的机房列表,并标记 StockStale。
+				apiServers = mergeStaleStock(apiServers, cached)
+				state.Logger.Warn("⚠️ 本次刷新有 "+strconv.Itoa(availFailed)+" 个机型的可用性拉取失败，这些机型沿用上一份库存", "")
+			}
+			if len(apiServers) > 0 {
 				if availFailed > 0 {
 					state.Logger.Warn("⚠️ 有 "+strconv.Itoa(availFailed)+" 个机型的可用性拉取失败，但本地无缓存可退，先用这份不完整数据", "")
 				}
@@ -266,7 +265,9 @@ func GetAvailability(state *app.State) gin.HandlerFunc {
 			var body struct {
 				Options interface{} `json:"options"`
 			}
-			_ = c.ShouldBindJSON(&body)
+			if !bindOptionalJSON(c, &body) {
+				return
+			}
 			switch v := body.Options.(type) {
 			case []interface{}:
 				for _, o := range v {
@@ -302,13 +303,13 @@ func GetAvailability(state *app.State) gin.HandlerFunc {
 				// 和"所有机房都没货"长得一模一样。这里明确告诉调用方是拿错区了。
 				state.Logger.Warn("查询 "+planCode+" 可用性: "+err.Error(), "availability")
 				c.JSON(http.StatusNotFound, gin.H{
-					"error":   "planCode 不属于该账户所在站点", "code": "E5F67A422",
+					"error": "planCode 不属于该账户所在站点", "code": "E5F67A422",
 					"message": err.Error(),
 				})
 			case errors.Is(err, catalog.ErrConfigNotMatched):
 				state.Logger.Warn("查询 "+planCode+" 可用性: "+err.Error(), "availability")
 				c.JSON(http.StatusNotFound, gin.H{
-					"error":   "该 plan 没有这套配置组合", "code": "E8B5F5226",
+					"error": "该 plan 没有这套配置组合", "code": "E8B5F5226",
 					"message": err.Error(),
 				})
 			default:
@@ -338,12 +339,15 @@ func MonitorPrice(state *app.State) gin.HandlerFunc {
 			return
 		}
 		var body struct {
+			Duration   string   `json:"duration"`
 			AccountID  string   `json:"account_id"` // 哪个账户询价(空 = 默认)
 			PlanCode   string   `json:"plan_code"`
 			Datacenter string   `json:"datacenter"`
 			Options    []string `json:"options"`
 		}
-		_ = c.ShouldBindJSON(&body)
+		if !bindOptionalJSON(c, &body) {
+			return
+		}
 		if body.PlanCode == "" {
 			c.JSON(http.StatusBadRequest, gin.H{"success": false, "error": "缺少 plan_code 参数", "code": "E036D6AFA"})
 			return
@@ -353,7 +357,7 @@ func MonitorPrice(state *app.State) gin.HandlerFunc {
 		}
 		// 监控轮询是唯一调用方(本地白名单),短 TTL 缓存削掉每轮全量验价的
 		// 完整购物车周期 —— 不加的话持续有货的订阅自己就能把账户打进 429
-		result := price.GetInternalCached(state, body.AccountID, body.PlanCode, body.Datacenter, body.Options)
+		result := price.GetInternalCached(state, body.AccountID, body.PlanCode, body.Datacenter, body.Options, body.Duration)
 		c.JSON(http.StatusOK, result)
 	}
 }
@@ -376,11 +380,14 @@ func ServerPrice(state *app.State) gin.HandlerFunc {
 			return
 		}
 		var body struct {
+			Duration   string   `json:"duration"`
 			AccountID  string   `json:"account_id"`
 			Datacenter string   `json:"datacenter"`
 			Options    []string `json:"options"`
 		}
-		_ = c.ShouldBindJSON(&body)
+		if !bindOptionalJSON(c, &body) {
+			return
+		}
 
 		accountID := c.Query("account")
 		if accountID == "" {
@@ -405,7 +412,7 @@ func ServerPrice(state *app.State) gin.HandlerFunc {
 			datacenter = defaultDatacenterFor(state, accountID, planCode)
 		}
 
-		result := price.GetInternal(state, accountID, planCode, datacenter, body.Options)
+		result := price.GetInternal(state, accountID, planCode, datacenter, body.Options, body.Duration)
 		if !result.Success {
 			// 询价失败是业务结果（配置在该机房不可订购等），不是服务端故障，
 			// 保持 200 + success:false，前端按 success 字段判断即可。
@@ -467,7 +474,9 @@ func ClearCache(state *app.State) gin.HandlerFunc {
 		var body struct {
 			Type string `json:"type"`
 		}
-		_ = c.ShouldBindJSON(&body)
+		if !bindOptionalJSON(c, &body) {
+			return
+		}
 		cacheType := body.Type
 		if cacheType == "" {
 			cacheType = "all"
@@ -511,4 +520,20 @@ func ClearCache(state *app.State) gin.HandlerFunc {
 func JSONString(v interface{}) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// mergeStaleStock 本次没读到库存的型号沿用旧缓存里的机房列表,其余型号用新数据。
+func mergeStaleStock(fresh, cached []types.ServerPlan) []types.ServerPlan {
+	old := make(map[string]types.ServerPlan, len(cached))
+	for _, p := range cached {
+		old[p.PlanCode] = p
+	}
+	out := make([]types.ServerPlan, len(fresh))
+	for i, p := range fresh {
+		if prev, ok := old[p.PlanCode]; ok && p.StockStale && len(prev.Datacenters) > 0 {
+			p.Datacenters = prev.Datacenters
+		}
+		out[i] = p
+	}
+	return out
 }

@@ -34,7 +34,8 @@ const pack: WatchPagesPack = {
     list: {
       failed: "Failed to load the subscription list",
       empty: "No subscriptions",
-      emptyDesc: "Click \"Add subscription\" to start monitoring servers",
+      emptyDesc: "Subscribe to models and datacenters to get restock alerts instantly, with optional auto-ordering.",
+      emptyAdd: "Add subscription",
     },
     remove: {
       title: "Unsubscribe",
@@ -59,8 +60,6 @@ const pack: WatchPagesPack = {
       notifyAvailable: "In-stock alert",
       notifyUnavailable: "Out-of-stock alert",
       autoOrder: "Auto-order",
-      autoPaySuffix: " · auto-pay",
-      autoPayTitle: "Pay automatically once the order is placed",
       manualPayTitle: "Order only; you pay yourself",
       autoNoAccount: "Auto-order checked but no account selected (notify only)",
       historyAria: "View history",
@@ -105,9 +104,6 @@ const pack: WatchPagesPack = {
       qtyLabel: "Quantity",
       qtyPlaceholder: "Default 1",
       qtyHint: "Total orders = detected configurations × available datacenters × quantity",
-      autoPay: "Pay automatically once the order is placed",
-      autoPayHint:
-        "Charged to the OVH account's default payment method (set it up in OVH first). If unchecked, the order is placed only and you must pay before it expires",
       submitting: "Submitting…",
       checking: "Checking notification…",
       save: "Save changes",
@@ -161,7 +157,7 @@ const pack: WatchPagesPack = {
     list: {
       failed: "Failed to load the VPS subscription list",
       empty: "No VPS subscriptions",
-      emptyDesc: "Click \"Add subscription\" and pick a VPS model to start monitoring",
+      emptyDesc: "Pick a VPS model and datacenter to get notified the moment it restocks.",
     },
     remove: {
       title: "Unsubscribe",
@@ -177,8 +173,6 @@ const pack: WatchPagesPack = {
       retired: "Retired",
       retiredTitle: "OVH no longer sells this model; this subscription will never see stock",
       autoOrder: "Auto-order",
-      autoPaySuffix: " · auto-pay",
-      autoPayTitle: "Pay automatically once the order is placed",
       manualPayTitle: "Order only; you pay yourself",
       dcs: "Monitoring datacenters: {{dcs}}",
       allDcs: "Monitoring all datacenters",
@@ -231,9 +225,6 @@ const pack: WatchPagesPack = {
       osDefault: "Use the OVH default image",
       osHint:
         "Unlike dedicated servers, a VPS OS must be chosen **at order time**; changing it later means a reinstall. Keep the default if unsure",
-      autoPay: "Pay automatically once the order is placed",
-      autoPayHint:
-        "Charged to the OVH account's default payment method (set it up in OVH first). If unchecked, the order is placed only and you must pay before it expires",
       submitting: "Submitting…",
       checking: "Checking notification…",
       confirmAdd: "Add",

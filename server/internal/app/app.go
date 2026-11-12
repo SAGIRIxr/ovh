@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,6 +16,7 @@ import (
 	"github.com/ovh-buy/server/internal/db"
 	"github.com/ovh-buy/server/internal/logger"
 	"github.com/ovh-buy/server/internal/netfp"
+	"github.com/ovh-buy/server/internal/orderterm"
 	"github.com/ovh-buy/server/internal/ovh"
 	"github.com/ovh-buy/server/internal/storage"
 	"github.com/ovh-buy/server/internal/types"
@@ -135,6 +137,9 @@ type State struct {
 	QueueMu          sync.Mutex
 	Queue            []types.QueueItem
 	StockSignals     StockSignals
+	// MonitorIntervalSeconds 由监控写入当前检查间隔,抢购的共享库存探测据此加快(不慢于 2 秒)
+	MonitorIntervalSeconds atomic.Int64
+	OrderPrewarm           OrderPrewarmer
 	// QueueMu 同时保护用户对监控自动建单的停止记录。
 	automaticOrderBlocks   map[string]bool
 	pausedMonitorScopes    []MonitorQueueScope
@@ -485,6 +490,13 @@ func (s *State) EnqueueAutomaticItems(items []types.QueueItem, prepend bool) err
 
 // enqueueItems 在同一队列锁内校验自动建单许可并持久化任务。
 func (s *State) enqueueItems(items []types.QueueItem, prepend, automatic bool) error {
+	for i := range items {
+		duration, err := orderterm.Normalize(items[i].Duration)
+		if err != nil {
+			return err
+		}
+		items[i].Duration = duration
+	}
 	defer s.WakeQueue()
 	if len(items) == 0 {
 		return nil
@@ -542,7 +554,7 @@ var ErrQueueNotFound = errors.New("任务不存在")
 var ErrQueueNotEditable = errors.New("请先暂停任务再修改；已完成的任务不能修改")
 
 // UpdateQueueItem 仅编辑暂停/失败任务,落库成功后才发布新配置。
-func (s *State) UpdateQueueItem(id, datacenter string, options []string, retryInterval int, autoPay bool, coupon string, couponFallback bool) error {
+func (s *State) UpdateQueueItem(id, datacenter string, options []string, retryInterval int, coupon string, duration *string) error {
 	if err := s.SaveBlocked("queue"); err != nil {
 		return err
 	}
@@ -561,9 +573,14 @@ func (s *State) UpdateQueueItem(id, datacenter string, options []string, retryIn
 		next[i].Datacenter = datacenter
 		next[i].Options = append([]string(nil), options...)
 		next[i].RetryInterval = retryInterval
-		next[i].AutoPay = autoPay
+		if duration != nil {
+			selected, err := orderterm.Normalize(*duration)
+			if err != nil {
+				return err
+			}
+			next[i].Duration = selected
+		}
 		next[i].Coupon = coupon
-		next[i].CouponFallback = couponFallback && autoPay
 		next[i].Status = "paused"
 		next[i].FailureCount = 0
 		next[i].LastCheckTime = 0
@@ -575,27 +592,6 @@ func (s *State) UpdateQueueItem(id, datacenter string, options []string, retryIn
 		return nil
 	}
 	return ErrQueueNotFound
-}
-
-// ClearUncertainCheckout 恢复后对账确认上一单没建成,去掉未决标记并落库。
-// 落库失败只记日志:标记残留的代价只是下次再对账一次。
-func (s *State) ClearUncertainCheckout(id string) {
-	s.QueueMu.Lock()
-	changed := false
-	for i := range s.Queue {
-		if s.Queue[i].ID == id && s.Queue[i].UncertainCheckout {
-			s.Queue[i].UncertainCheckout = false
-			s.Queue[i].UncertainTime = ""
-			changed = true
-			break
-		}
-	}
-	s.QueueMu.Unlock()
-	if changed {
-		if err := s.SaveQueue(); err != nil {
-			s.Logger.Warn("清除结账未决标记后保存队列失败: "+err.Error(), "queue")
-		}
-	}
 }
 
 // MarkTaskDeleted 标记删除并中断本轮下单,所有删除入口统一调用。

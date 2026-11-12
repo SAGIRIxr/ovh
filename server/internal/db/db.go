@@ -9,7 +9,9 @@ package db
 import (
 	_ "embed"
 	"fmt"
+	"net/url"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/jmoiron/sqlx"
@@ -35,6 +37,10 @@ type DB struct {
 //   - busy_timeout=5000：被其它写阻塞时最多等 5 秒再 SQLITE_BUSY
 func Open(dataDir string) (*DB, error) {
 	path := filepath.Join(dataDir, "sniper.db")
+	path, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve database path: %w", err)
+	}
 	sx, err := sqlx.Open(driverName, makeDSN(path))
 	if err != nil {
 		return nil, fmt.Errorf("open sqlite (%s) %s: %w", driverName, path, err)
@@ -57,6 +63,15 @@ func Open(dataDir string) (*DB, error) {
 	return db, nil
 }
 
+// SQLite treats # and ? as URI delimiters; encode paths so two data directories cannot share a database.
+func sqliteFileURI(path string) string {
+	uriPath := filepath.ToSlash(path)
+	if !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath // Windows drive paths require file:///C:/…
+	}
+	return (&url.URL{Scheme: "file", Path: uriPath}).String()
+}
+
 // migrate 跑 schema.sql 里所有 CREATE TABLE / INDEX（用 IF NOT EXISTS，重复跑安全）+ 增量列迁移
 func (db *DB) migrate() error {
 	if _, err := db.Exec(schemaSQL); err != nil {
@@ -71,17 +86,21 @@ func (db *DB) migrate() error {
 	// retraction_time:撤销权截止日。老库没有这一列,而 ListHistory 用 SELECT * + sqlx 严格映射,
 	// 只加结构体字段不加列会让整个历史列表报 missing destination name,两者必须同一次上线。
 	// failure_count:只记真正提交并失败的次数(无货轮次不计),MaxRetries 靠它封顶
-	// auto_pay:下单后用默认支付方式自动付款的显式开关
+	// auto_pay:旧版「自动付款」开关;功能已删除,列仅为兼容旧库保留,写入恒为 0
 	if err := db.addColumnIfMissing("queue", "auto_pay", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	if err := db.addColumnIfMissing("queue", "preorder", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	if err := db.addColumnIfMissing("queue", "preorder_wait_stock", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		return err
+	}
 	if err := db.addColumnIfMissing("queue", "coupon", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	// 强制入队 / 优惠码被拒仍付款 / 结账未决标记。ListQueue 是 SELECT * 严格映射,列和字段必须同时上线
+	// 强制入队 / FQN 锁定;coupon_fallback / uncertain_* 是已删除功能留下的列,老库里有,新库也建上保持一致。
+	// ListQueue 是 SELECT * 严格映射,列和字段必须同时上线
 	for _, col := range [][2]string{
 		{"force_order", "INTEGER NOT NULL DEFAULT 0"},
 		{"coupon_fallback", "INTEGER NOT NULL DEFAULT 0"},
@@ -90,6 +109,17 @@ func (db *DB) migrate() error {
 		{"fqn", "TEXT NOT NULL DEFAULT ''"},
 	} {
 		if err := db.addColumnIfMissing("queue", col[0], col[1]); err != nil {
+			return err
+		}
+	}
+	// 抢购耗时:发现库存→结账写出(微秒)、是否预装/复用连接、从建任务到抢到(毫秒)
+	for _, c := range [][2]string{
+		{"detection_to_write_us", "INTEGER NOT NULL DEFAULT 0"},
+		{"prewarmed", "INTEGER NOT NULL DEFAULT 0"},
+		{"connection_reused", "INTEGER NOT NULL DEFAULT 0"},
+		{"wait_ms", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if err := db.addColumnIfMissing("history", c[0], c[1]); err != nil {
 			return err
 		}
 	}
@@ -119,6 +149,11 @@ func (db *DB) migrate() error {
 	if err := db.addColumnIfMissing("queue", "failure_count", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
+	for _, c := range [][2]string{{"order_group", "TEXT NOT NULL DEFAULT ''"}, {"group_limit", "INTEGER NOT NULL DEFAULT 0"}, {"stop_reason", "TEXT NOT NULL DEFAULT ''"}} {
+		if err := db.addColumnIfMissing("queue", c[0], c[1]); err != nil {
+			return err
+		}
+	}
 	// order_status / order_status_at:OVH 侧订单支付状态(GET /me/order/{id}/status)。
 	// timing / total_ms:抢购各阶段耗时,以前只在内存,重启即丢。
 	// ListHistory 是 SELECT * + sqlx 严格映射,结构体字段和列必须同一次上线。
@@ -146,6 +181,11 @@ func (db *DB) migrate() error {
 	}
 	if err := db.migrateMonitorIdentity(); err != nil {
 		return fmt.Errorf("migrate monitor identity: %w", err)
+	}
+	for _, table := range []string{"queue", "history", "monitor_subscriptions", "vps_subscriptions"} {
+		if err := db.addColumnIfMissing(table, "duration", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
 	}
 	if err := db.addColumnIfMissing("vps_subscriptions", "auto_order_account_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err

@@ -182,8 +182,60 @@ test("stock-only Eco models become searchable prereleases without replacing list
   assert.deepEqual(mergeStockPlans([listed]), [listed]);
 });
 
+test("all 12 API prerelease models expose every stock configuration without CPU or prices", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const stock = JSON.parse(await readFile(new URL("../../server/internal/purchase/testdata/preorder-stock.json", import.meta.url), "utf8"));
+  const { matchesServerSearch } = await server.ssrLoadModule("/src/lib/stock-plans.ts");
+  const { preorderVariantCoversAll } = await server.ssrLoadModule("/src/lib/preorder-options.ts");
+  const models = mergeStockPlans([], stock);
+  assert.equal(models.length, 12);
+  assert.equal(stock.length, 56);
+  for (const row of stock) {
+    const plan = models.find((model) => model.planCode === row.planCode);
+    assert.equal(plan.prerelease, true);
+    assert.equal(plan.cpu, "—");
+    assert.ok(plan.availableOptions.some((option) => option.value === row.memory));
+    assert.ok(plan.availableOptions.some((option) => option.value === row.storage));
+    assert.equal(preorderVariantCoversAll(row.fqn, [row.memory, row.storage]), true);
+  }
+  for (const [alias, code] of [["KS-LE-1", "27skle01-v1"], ["SYS-LE-2", "27sysle02-v1"], ["SYS-STOR-LE-1", "27sysstorle01-v1"], ["RISE-LE-3", "27risele03-v1"]]) {
+    assert.equal(models.find((model) => model.planCode === code).name, alias);
+    assert.ok(models.some((model) => model.planCode === code && matchesServerSearch(model, alias)));
+    assert.ok(models.some((model) => model.planCode === code && matchesServerSearch(model, alias.toLowerCase().replaceAll("-", " "))));
+  }
+});
 
-test("coupon is trimmed and sent to every datacenter and quantity task", async () => {
+test("CPU and price publication retain preorder intent while exact RAM and disks stay unchanged", async () => {
+  const { preorderOptions, retainPreorderPlan, preorderVariantCoversAll } = await server.ssrLoadModule("/src/lib/preorder-options.ts");
+  const plan = "27skle03-v1";
+  let saved = retainPreorderPlan("", plan, true);
+  saved = retainPreorderPlan(saved, plan, false);
+  assert.equal(saved, plan, "publishing CPU/pricing must not turn this into an ordinary order");
+  assert.equal(retainPreorderPlan(saved, "27skle04-v1", false), "");
+  const options = ["ram-32g-ddr4-ecc-2666", "hybridsoftraid-2x8000sa-2x480ssd"];
+  assert.deepEqual(preorderOptions(["CPU-unpublished", ...options, "fixed-cpu-old"], ["fixed-cpu-old"]), options);
+  const fqn = `${plan}.${options.join(".")}`;
+  assert.equal(preorderVariantCoversAll(fqn, options), true);
+  assert.equal(preorderVariantCoversAll(fqn, ["ram-32g-ddr4-ecc-2400", options[1]]), false);
+  assert.equal(preorderVariantCoversAll(fqn, [options[0], "softraid-2x480ssd"]), false);
+});
+
+test("preorder option labels retain DDR, ECC, frequency and every disk group", async () => {
+  const { describeOptionCode } = await server.ssrLoadModule("/src/lib/option-groups.ts");
+  assert.equal(describeOptionCode("ram-16g-ddr3-noecc-1333"), "16 GB · DDR3 · Non-ECC · 1333 MHz");
+  assert.equal(describeOptionCode("ram-32g-ddr4-ecc-2666"), "32 GB · DDR4 · ECC · 2666 MHz");
+  for (const [code, first, second] of [
+    ["hybridsoftraid-2x8000sa-2x480ssd", "2× 8TB HDD", "2× 480GB SSD"],
+    ["hybridsoftraid-4x12000sa-1x512nvme", "4× 12TB HDD", "1× 512GB NVMe"],
+    ["softraid-2x480ssd-2x8000sa-27skle03-v1", "2× 480GB SSD", "2× 8TB HDD"],
+  ]) {
+    const label = describeOptionCode(code);
+    assert.ok(label.includes(first) && label.includes(second), label);
+  }
+});
+
+
+test("coupon and quantity scope are sent in one atomic queue request", async () => {
   const { useCreateQueueItem } = await server.ssrLoadModule("/src/hooks/use-queue.ts");
   const { api } = await server.ssrLoadModule("/src/lib/api.ts");
   const client = new QueryClient();
@@ -192,18 +244,21 @@ test("coupon is trimmed and sent to every datacenter and quantity task", async (
   api.defaults.adapter = async (config) => {
     assert.equal(config.url, "/queue");
     bodies.push(JSON.parse(config.data));
-    return { data: {}, status: 200, statusText: "OK", headers: {}, config };
+    return { data: { count: JSON.parse(config.data).datacenters.length * JSON.parse(config.data).quantity }, status: 200, statusText: "OK", headers: {}, config };
   };
   let mutation;
   function Probe() { mutation = useCreateQueueItem(); return null; }
   try {
     renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(Probe)));
-    const result = await mutation.mutateAsync({ account_id: "eu", planCode: "24sk202", datacenters: ["gra", "rbx"], quantity: 2, options: ["ram-64g"], preorder: true, coupon: " Save10 " });
+    const result = await mutation.mutateAsync({ account_id: "eu", planCode: "24sk202", datacenters: ["gra", "rbx"], quantity: 2, options: ["ram-64g"], preorder: true, purchaseMode: "total", coupon: " Save10 " });
     assert.equal(result.success, 4);
-    assert.deepEqual(bodies.map((b) => b.datacenter), ["gra", "gra", "rbx", "rbx"]);
+    assert.equal(bodies.length, 1);
+    assert.deepEqual(bodies[0].datacenters, ["gra", "rbx"]);
+    assert.equal(bodies[0].quantity, 2);
+    assert.equal(bodies[0].purchaseMode, "total");
     for (const body of bodies) {
       assert.equal(body.coupon, "Save10");
-      assert.equal(body.autoPay, false);
+      assert.equal("autoPay" in body, false); // 自动付款已删除:请求不再携带该字段
       assert.equal(body.preorder, true);
       assert.deepEqual(body.options, ["ram-64g"]);
     }
@@ -245,7 +300,7 @@ test("task edits update one queue item and monitor edits retain exact empty conf
   function Probe() { queue = useUpdateQueueItem(); monitor = useUpdateMonitorSubscription(); pause = usePauseMonitorSubscription(); return null; }
   try {
     renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(Probe)));
-    await queue.mutateAsync({ id: "task", datacenter: "rbx", options: ["ram-64g", "custom-addon"], retryInterval: 17, autoPay: false, coupon: "Save10" });
+    await queue.mutateAsync({ id: "task", datacenter: "rbx", options: ["ram-64g", "custom-addon"], retryInterval: 17, coupon: "Save10", duration: "P12M" });
     await monitor.mutateAsync({ planCode: "plan", optionsKey: "", notifyAvailable: false, options: ["ram-32g"] });
     await pause.mutateAsync({ planCode: "plan", optionsKey: "", paused: true });
     assert.equal(calls.length, 3);
@@ -729,4 +784,213 @@ test("queue dispatch timings render only observed writes in both languages", asy
       }
     }
   } finally { await i18n.changeLanguage(original); client.clear(); }
+});
+
+test("service details and mutations remain scoped to the account that owns the view", async () => {
+  const { useServerServiceInfo } = await server.ssrLoadModule("/src/hooks/use-server-control.ts");
+  const { useUpdateVpsRenewal } = await server.ssrLoadModule("/src/hooks/use-vps-control.ts");
+  const { api } = await server.ssrLoadModule("/src/lib/api.ts");
+  const original = api.defaults.adapter;
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const euKey = ["server-control", "service-info", "same-service", { accountId: "eu" }];
+  const usKey = ["server-control", "service-info", "same-service", { accountId: "us" }];
+  const calls = [];
+  let mutation;
+  api.defaults.adapter = async config => {
+    calls.push(config);
+    return { data: { success: true }, status: 200, statusText: "OK", headers: {}, config };
+  };
+  function Probe() {
+    const info = useServerServiceInfo("same-service");
+    mutation = useUpdateVpsRenewal("same-service");
+    return createElement("span", null, info.data?.status || "loading");
+  }
+  try {
+    client.setQueryData(["accounts", "list"], [{ id: "eu", isDefault: true }, { id: "us" }]);
+    client.setQueryData(euKey, { status: "eu-only" });
+    assert.match(renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(Probe))), /eu-only/);
+    // An operation created for EU must retain that account after the selected default changes.
+    client.setQueryData(["accounts", "list"], [{ id: "eu" }, { id: "us", isDefault: true }]);
+    await mutation.mutateAsync({ mode: "manual" });
+    assert.equal(calls[0].params.account, "eu");
+    const html = renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(Probe)));
+    assert.ok(html.includes("loading") && !html.includes("eu-only"));
+    assert.ok(client.getQueryState(usKey));
+    assert.ok(client.getQueryData(euKey));
+  } finally { api.defaults.adapter = original; client.clear(); }
+});
+
+test("OS template storage is account-scoped and rejects malformed responses", async () => {
+  const { useServerTemplates } = await server.ssrLoadModule("/src/hooks/use-server-control.ts");
+  const { api } = await server.ssrLoadModule("/src/lib/api.ts");
+  const originalAdapter = api.defaults.adapter;
+  const originalStorage = globalThis.localStorage;
+  const entries = new Map([
+    ["ovh_sniper_templates_same-service", JSON.stringify([{ templateName: "legacy-other-account" }])],
+    ['ovh_sniper_templates_["eu","same-service"]', JSON.stringify([{ templateName: "eu-only" }])],
+    ['ovh_sniper_templates_["us","same-service"]', JSON.stringify({ invalid: true })],
+  ]);
+  globalThis.localStorage = { getItem: key => entries.get(key) ?? null, setItem: (key, value) => entries.set(key, value) };
+  const client = new QueryClient();
+  api.defaults.adapter = async config => ({ data: { templates: {} }, status: 200, statusText: "OK", headers: {}, config });
+  function Probe() {
+    const query = useServerTemplates("same-service", false);
+    return createElement("span", null, query.data?.map(item => item.templateName).join(",") || "loading");
+  }
+  try {
+    client.setQueryData(["accounts", "list"], [{ id: "eu", isDefault: true }, { id: "us" }]);
+    assert.match(renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(Probe))), /eu-only/);
+    client.setQueryData(["accounts", "list"], [{ id: "eu" }, { id: "us", isDefault: true }]);
+    const html = renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(Probe)));
+    assert.ok(html.includes("loading") && !html.includes("eu-only") && !html.includes("legacy-other-account"));
+    const query = client.getQueryCache().find({ queryKey: ["server-control", "os-templates", "same-service", { accountId: "us" }] });
+    await assert.rejects(query.options.queryFn(), /模板列表响应格式错误|Invalid OS template response/);
+  } finally {
+    api.defaults.adapter = originalAdapter;
+    if (originalStorage === undefined) delete globalThis.localStorage;
+    else globalThis.localStorage = originalStorage;
+    client.clear();
+  }
+});
+
+test("ambiguous checkout history is labeled as needing verification in both languages", async () => {
+  const { Route: HistoryRoute } = await server.ssrLoadModule("/src/routes/history.tsx");
+  const { default: i18n } = await server.ssrLoadModule("/src/i18n/index.ts");
+  const language = i18n.language;
+  const client = new QueryClient();
+  client.setQueryData(["history"], [{ id: "uncertain", accountId: "eu", planCode: "vps-fixture", datacenter: "DE", status: "uncertain", errorMessage: "Check the order in OVH", purchaseTime: "2026-11-03T00:00:00Z" }]);
+  try {
+    for (const lang of ["zh", "en"]) {
+      await i18n.changeLanguage(lang);
+      const html = renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(HistoryRoute.options.component)));
+      assert.match(html, lang === "zh" ? /待核对/ : /Needs verification/);
+      assert.ok(html.includes("vps-fixture"));
+    }
+  } finally { await i18n.changeLanguage(language); client.clear(); }
+});
+
+test("a delayed 401 cannot erase a newly entered API key", async () => {
+  const { api, onAuthFailure } = await server.ssrLoadModule("/src/lib/api.ts");
+  const originalAdapter = api.defaults.adapter, originalWindow = globalThis.window;
+  let key = "old-key", expired = 0, rejectResponse, entered;
+  const ready = new Promise(resolve => { entered = resolve; });
+  globalThis.window = { localStorage: { getItem: name => name === "ovh_sniper_api_key" ? key : null, removeItem: () => { key = null; } } };
+  const unregister = onAuthFailure(() => { expired++; });
+  api.defaults.adapter = config => new Promise((resolve, reject) => {
+    rejectResponse = () => reject(Object.assign(new Error("expired request"), { config, response: { status: 401, data: { code: "INVALID_API_KEY" } } }));
+    entered();
+  });
+  try {
+    const request = api.get("/ovh/account/info");
+    await ready;
+    key = "new-key";
+    rejectResponse();
+    await assert.rejects(request, /expired request/);
+    assert.equal(key, "new-key");
+    assert.equal(expired, 0);
+    api.defaults.adapter = async config => { throw Object.assign(new Error("current request rejected"), { config, response: { status: 401, data: { code: "INVALID_API_KEY" } } }); };
+    await assert.rejects(api.get("/ovh/account/info"), /current request rejected/);
+    assert.equal(expired, 1);
+    assert.equal(key, null);
+  } finally {
+    unregister(); api.defaults.adapter = originalAdapter;
+    if (originalWindow === undefined) delete globalThis.window; else globalThis.window = originalWindow;
+  }
+});
+
+test("prewarm identity includes account, payment and coupon while normalizing selection order", async () => {
+  const { prewarmIdentity } = await server.ssrLoadModule("/src/lib/order-prewarm.ts");
+  const request = { account_id: "eu", planCode: "plan", datacenters: ["mum", "bhs"], options: ["ram-32g", "storage"], quantity: 1, coupon: "SAVE", preorder: false };
+  const key = prewarmIdentity(request);
+  assert.equal(key, prewarmIdentity({ ...request, datacenters: ["bhs", "ynm", "mum"], options: ["storage", "ram-32g", "storage"], coupon: " SAVE " }));
+  for (const change of [{ account_id: "us" }, { coupon: "OTHER" }, { options: ["ram-64g"] }, { quantity: 2 }]) {
+    assert.notEqual(key, prewarmIdentity({ ...request, ...change }));
+  }
+});
+
+test("prewarm UI explains readiness, fallback and standby without ordering in both languages", async () => {
+  const { OrderPrewarm, StandbyCarts } = await server.ssrLoadModule("/src/components/queue/OrderPrewarm.tsx");
+  const { default: i18n } = await server.ssrLoadModule("/src/i18n/index.ts");
+  const language = i18n.language;
+  const client = new QueryClient();
+  client.setQueryData(["accounts", "list"], [{ id: "eu", name: "Europe" }]);
+  const status = { id: "web:unique-request", accountId: "eu", planCode: "KS-5", datacenters: ["bhs"], ready: 1, total: 1, state: "ready", standby: true, expiresAt: "2026-11-04T02:00:00Z" };
+  client.setQueryData(["purchase", "prewarm"], [status, { ...status, id: "monitor:hidden", planCode: "hidden" }]);
+  try {
+    for (const lang of ["zh", "en"]) {
+      await i18n.changeLanguage(lang);
+      const html = renderToStaticMarkup(createElement(OrderPrewarm, { preparation: { enabled: true, status, pin() {}, submitted() {} } }));
+      assert.match(html, lang === "zh" ? /购物车已就绪/ : /Carts ready/);
+      assert.match(html, lang === "zh" ? /确认创建抢购任务后才会下单/ : /Ordering starts after you confirm/);
+      assert.ok(html.includes('role="status"'));
+      const estimate = renderToStaticMarkup(createElement(OrderPrewarm, { preparation: { enabled: true, status: { ...status, estimated: true }, pin() {}, submitted() {} } }));
+      assert.match(estimate, lang === "zh" ? /无货期间按目录核价/ : /Priced from the catalog while out of stock/);
+      assert.doesNotMatch(html, /prewarm\.[a-z]/);
+      const waiting = renderToStaticMarkup(createElement(OrderPrewarm, { preparation: { enabled: true, error: "offline", pin() {}, submitted() {} } }));
+      assert.match(waiting, lang === "zh" ? /可以照常创建任务/ : /You can still create a task/);
+      const list = renderToStaticMarkup(createElement(QueryClientProvider, { client }, createElement(StandbyCarts)));
+      assert.ok(list.includes("KS-5") && list.includes("Europe") && !list.includes("hidden"));
+      assert.match(list, lang === "zh" ? /取消 KS-5 的备车/ : /Discard standby carts for KS-5/);
+    }
+  } finally { await i18n.changeLanguage(language); client.clear(); }
+});
+
+const { durationMonths, supportsDuration } = await server.ssrLoadModule("/src/lib/order-duration.ts");
+const { OrderDurationField, OrderDurationLabel } = await server.ssrLoadModule("/src/components/queue/OrderDurationField.tsx");
+test("annual periods match aliases and cannot consume a monthly prewarm", async () => {
+  const { prewarmIdentity } = await server.ssrLoadModule("/src/lib/order-prewarm.ts");
+  const request = { account_id: "eu", planCode: "plan", datacenters: ["gra"], options: [], quantity: 1, coupon: "", preorder: false };
+  assert.equal(durationMonths("P1Y"), 12);
+  assert.equal(supportsDuration(["P12M"], "P1Y"), true);
+  assert.equal(supportsDuration(["P1M"], "P12M"), false);
+  assert.equal(prewarmIdentity(request), prewarmIdentity({ ...request, duration: "P1M" }));
+  assert.notEqual(prewarmIdentity(request), prewarmIdentity({ ...request, duration: "P12M" }));
+});
+test("purchase period field labels and unsupported states work in both languages", async () => {
+  const { default: i18n } = await server.ssrLoadModule("/src/i18n/index.ts");
+  for (const [language, label, annual] of [["zh", "购买时长", "1 年"], ["en", "Purchase period", "1 year"]]) {
+    await i18n.changeLanguage(language);
+    assert.ok(renderToStaticMarkup(createElement(OrderDurationLabel, { value: "P12M" })).includes(annual));
+    const html = renderToStaticMarkup(createElement(OrderDurationField, { value: "P12M", onChange() {}, query: { data: ["P1M"], isFetching: false, isError: false } }));
+    assert.ok(html.includes(label));
+    assert.ok(html.includes('aria-invalid="true"'));
+    assert.ok(html.includes(i18n.t("orderDuration.unsupported")));
+    assert.ok(!html.includes("orderDuration."));
+  }
+});
+
+
+test("presale tasks require explicit RAM and complete disks, and scope labels work in both languages", async () => {
+  const { hasPreorderHardware } = await server.ssrLoadModule("/src/lib/preorder-options.ts");
+  const { OrderPurchaseScope } = await server.ssrLoadModule("/src/components/queue/OrderPurchaseScope.tsx");
+  const { default: i18n } = await server.ssrLoadModule("/src/i18n/index.ts");
+  assert.equal(hasPreorderHardware([]), false);
+  assert.equal(hasPreorderHardware(["ram-32g-ddr4-ecc-2400"]), false);
+  assert.equal(hasPreorderHardware(["ram-32g-ddr4-ecc-2400", "hybridsoftraid-2x8000sa-2x480ssd"]), true);
+  const original = i18n.language;
+  try {
+    for (const lang of ["zh", "en"]) {
+      await i18n.changeLanguage(lang);
+      const html = renderToStaticMarkup(createElement(OrderPurchaseScope, { id: "test-scope", value: "total", onChange() {} }));
+      assert.match(html, /for="test-scope"/);
+      assert.match(html, lang === "zh" ? /所选机房合计/ : /Total across selected datacenters/);
+      assert.doesNotMatch(html, /queue\.(scope|purchase)/);
+      for (const key of ["groupComplete", "groupUncertain", "phase.waitingQuote", "phase.waitingOptions", "phase.waitingQuota"]) assert.notEqual(i18n.t(`queue.${key}`), `queue.${key}`);
+    }
+  } finally { await i18n.changeLanguage(original); }
+});
+
+
+test("presale preparation timing phases are translated in tooltips", async () => {
+  const { TimingChip } = await server.ssrLoadModule("/src/components/common/TimingChip.tsx");
+  const { default: i18n } = await server.ssrLoadModule("/src/i18n/index.ts");
+  const original = i18n.language;
+  try {
+    for (const lang of ["zh", "en"]) {
+      await i18n.changeLanguage(lang);
+      const html = renderToStaticMarkup(createElement(TimingChip, { totalMs: 3, phases: [{ name: "复用已核验配置", ms: 2 }] }));
+      assert.match(html, lang === "zh" ? /复用已核验配置/ : /Reuse verified configuration/);
+      if (lang === "en") assert.doesNotMatch(html, /复用已核验配置/);
+    }
+  } finally { await i18n.changeLanguage(original); }
 });
